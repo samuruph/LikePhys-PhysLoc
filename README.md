@@ -1,11 +1,10 @@
 # LikePhys: Evaluating intuitive physics understanding in video diffusion models via likelihood preference 
-
+*LikePhys*, a training-free method that evaluates intuitive physics in video diffusion models by distinguishing physically valid and impossible videos using the denoising objective as an ELBO-based likelihood surrogate on a curated dataset of valid-invalid pairs.
 **ICLR 2026**
 
 [[arXiv]](https://arxiv.org/abs/2510.11512) [[Project Page]](https://yuanjianhao508.github.io/LikePhys/) [[Dataset]](https://huggingface.co/datasets/JianhaoDYDY/LikePhys-Benchmark)
 
-## Abstract
-*LikePhys*, a training-free method that evaluates intuitive physics in video diffusion models by distinguishing physically valid and impossible videos using the denoising objective as an ELBO-based likelihood surrogate on a curated dataset of valid-invalid pairs.
+
 
 ## Usage
 
@@ -115,4 +114,5 @@ If you use LikePhys in your research, please cite:
   booktitle={International Conference on Learning Representations (ICLR)},
   year={2026}
 }
+
 ```
