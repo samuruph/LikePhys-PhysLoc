@@ -32,6 +32,9 @@ import json
 import argparse
 
 def get_prompt(args):
+    if args.data == "physloc":
+        # Every PhysLoc clip carries its own caption; evaluate_physloc sets it per pair.
+        return args.physloc_prompt, "worst quality, inconsistent motion, blurry, jittery, distorted"
     if args.data == "ball_drop":
         prompt = "ball dropping and colliding with the ground, in empty background"
         # negative_prompt = "violate physics"
@@ -736,6 +739,41 @@ def evaluate_dataset(args, dataset_dir, pipe):
     return results
 
 
+def evaluate_physloc(args, pipe):
+    """
+    Evaluate a PhysLoc release. Each valid/invalid pair is a subgroup, and an
+    invalid clip's variation type is `<family>_<severity bin>`, so the mis-rank
+    is reported per family and severity.
+    """
+    from physloc_dataset import iter_groups
+
+    filters = {"family": args.physloc_family, "scenario": args.physloc_scenario,
+               "level": args.physloc_level, "split": args.physloc_split}
+    results = {}
+
+    for sub_idx, (pair_uid, prompt, videos) in enumerate(
+            iter_groups(args.physloc_root, args.physloc_repo, **filters)):
+        # One seed and one caption per pair, so valid and invalid are scored alike.
+        args.subgroup_seed = args.seed + sub_idx
+        args.physloc_prompt = prompt
+
+        subgroup_results = {}
+        for variation_type, video_path, clip_uid in videos:
+            loss, log_info = evaluate_video(args, video_path, pipe)
+            if loss is not None:
+                subgroup_results.setdefault(variation_type, {})[clip_uid] = {
+                    "loss": loss,
+                    "noise_pred_mean": log_info["noise_pred_mean"],
+                    "true_noise_mean": log_info["true_noise_mean"],
+                    "loss_array": log_info["loss_array"]
+                }
+
+        if subgroup_results:
+            results[pair_uid] = subgroup_results
+
+    return results
+
+
 def compute_misrank_normalized(results):
     """
     Compute mis-rank within each subgroup (valid vs invalid losses).
@@ -1030,6 +1068,14 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default="results", help="Output directory")
 
     parser.add_argument("--prompt_exp", type=str, default="no", help="for prompt exp")
+
+    # --data physloc
+    parser.add_argument("--physloc_root", type=str, default=None, help="PhysLoc release: a generated one (clips/) or an exported one (shards/)")
+    parser.add_argument("--physloc_repo", type=str, default=None, help="PhysLoc checkout holding physloc/loader.py (default: $PHYSLOC_REPO, then ../physloc)")
+    parser.add_argument("--physloc_family", type=str, default=None, help="only this violation family")
+    parser.add_argument("--physloc_scenario", type=str, default=None, help="only this scenario")
+    parser.add_argument("--physloc_level", type=str, default=None, help="only this complexity level (L0..L3)")
+    parser.add_argument("--physloc_split", type=str, default=None, help="only this split of an exported release (main, held_out, debug)")
     
     return parser.parse_args()
 
@@ -1112,6 +1158,12 @@ if __name__ == "__main__":
         }
     }
 
+    # PhysLoc is read through its own loader rather than a directory of mp4s
+    if args.data == "physloc":
+        if not args.physloc_root:
+            raise ValueError("--data physloc needs --physloc_root")
+        data_config["physloc"] = {"dataset_dir": args.physloc_root, "data_name": "physloc"}
+
     # Validate data choice
     if args.data not in data_config:
         raise ValueError(f"Invalid data configuration: {args.data}. Available options: {list(data_config.keys())}")
@@ -1169,7 +1221,10 @@ if __name__ == "__main__":
     _ = set_seed(args.seed)
 
     # Run evaluation
-    results = evaluate_dataset(args, dataset_dir, pipe)
+    if args.data == "physloc":
+        results = evaluate_physloc(args, pipe)
+    else:
+        results = evaluate_dataset(args, dataset_dir, pipe)
     misrank_metrics = compute_misrank_normalized(results)
     
     # Combine and save
