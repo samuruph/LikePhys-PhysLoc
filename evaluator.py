@@ -37,7 +37,7 @@ import argparse
 #   LikePhys (--data ball_drop, pendulum, ...)
 #       a directory of mp4 subgroups per scenario, one fixed caption for the
 #       whole scenario; listed in LIKEPHYS_PROMPTS / LIKEPHYS_DATASETS and
-#       scored by `evaluate_dataset`.
+#       scored by `evaluate_likephys`.
 #
 #   PhysLoc (--data physloc)
 #       a release read through PhysLoc's own loader, one caption per clip;
@@ -644,7 +644,7 @@ def evaluate_video(args, video_path, pipe, noise_aug_strength=0.02, num_videos_p
     else:
         print(f"Video: {video_path}, Loss: {loss:.4f}, Noise pred: {log_info['noise_pred_mean']:.4f}, True noise: {log_info['true_noise_mean']:.4f}")
 
-    visualize = False
+    visualize = args.visualize
     if visualize:
         with torch.no_grad():
             if args.model == "svd":
@@ -726,9 +726,9 @@ def evaluate_video(args, video_path, pipe, noise_aug_strength=0.02, num_videos_p
 
     return loss, log_info
 
-def evaluate_dataset(args, dataset_dir, pipe):
+def evaluate_likephys(args, dataset_dir, pipe):
     """
-    Evaluate videos grouped by subgroups.
+    Evaluate LikePhys videos grouped by subgroups.
     Store per-video losses without averaging.
     """
     results = {}
@@ -1111,6 +1111,7 @@ def parse_args():
     parser.add_argument("--tag_name", type=str, default=" ", help="Name of the ablation study")
     parser.add_argument("--exp_name", type=str, default="evaluation_t10_uniform", help="Name of the experiment")
     parser.add_argument("--output_dir", type=str, default="results", help="Output directory")
+    parser.add_argument("--visualize", action="store_true", help="Visualize the video and save to temp/check_video.mp4")
 
     parser.add_argument("--prompt_exp", type=str, default="no", help="for prompt exp")
 
@@ -1216,7 +1217,7 @@ if __name__ == "__main__":
     if args.data == PHYSLOC:
         results = evaluate_physloc(args, pipe)
     else:
-        results = evaluate_dataset(args, dataset_dir, pipe)
+        results = evaluate_likephys(args, dataset_dir, pipe)
     misrank_metrics = compute_misrank_normalized(results)
     
     # Combine and save
