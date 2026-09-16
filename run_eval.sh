@@ -3,7 +3,13 @@ GPUS=(0 1 2 3 4 5 6 7)
 NGPUS=${#GPUS[@]}
 
 SEEDS=(42)
+# LikePhys scenarios, each a folder of videos under ./data
 DATASETS=(ball_drop ball_collision pendulum block_slide pyramid fluid faucet river flag cloth shadow shadowm)
+# PhysLoc: point PHYSLOC_ROOT at a release to evaluate it as well, e.g.
+#   PHYSLOC_ROOT=data/physloc/samueleruf__physloc-mini bash run_eval.sh
+if [ -n "$PHYSLOC_ROOT" ]; then
+  DATASETS+=(physloc)
+fi
 MODELS=(animatediff zeroscope modelscope wan2.1-T2V-1.3b hunyuan_t2v ltx-0.9.5 animatediff_sdxl cogvideox mochi cogvideox-5b wan2.1-T2V-14b)
 FLAGS=("--guidance_scale")
 
@@ -36,9 +42,14 @@ for seed in "${SEEDS[@]}"; do
           sleep 1
         done
 
+        data_args=(--data="$data")
+        if [ "$data" = "physloc" ]; then
+          data_args+=(--physloc_root="$PHYSLOC_ROOT")
+        fi
+
         echo "→ GPU $gpu ← model=$model, data=$data, seed=$seed, flag=$flag"
         CUDA_VISIBLE_DEVICES=$gpu \
-          python evaluator.py --model="$model" --data="$data" --seed="$seed" $flag --tag_name="final" &
+          python evaluator.py --model="$model" "${data_args[@]}" --seed="$seed" $flag --tag_name="final" &
         GPU_PIDS[$gpu]=$!
       done
     done

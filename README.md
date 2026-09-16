@@ -4,6 +4,15 @@
 
 [[arXiv]](https://arxiv.org/abs/2510.11512) [[Project Page]](https://yuanjianhao508.github.io/LikePhys/) [[Dataset]](https://huggingface.co/datasets/JianhaoDYDY/LikePhys-Benchmark)
 
+This repository evaluates on **two benchmarks** with the same method and the same mis-rank metric:
+
+| Benchmark | `--data` | Videos | Caption |
+|---|---|---|---|
+| **LikePhys** | a scenario, e.g. `ball_drop` | `./data/<scenario>_videos/`, one folder of mp4s per scene | one fixed caption per scenario |
+| **PhysLoc** | `physloc` | a PhysLoc release (`--physloc_root` or `--physloc_hub_repo`) | each clip's own caption |
+
+Only how the videos are loaded, grouped and captioned differs; the models, the denoising loss and the mis-rank are shared. See [Datasets](#datasets).
+
 
 
 ## Usage
@@ -31,7 +40,12 @@ huggingface-cli download JianhaoDYDY/LikePhys-Benchmark --repo-type dataset --lo
 
 2. **Run Single Evaluation**:
 ```bash
+# LikePhys: one physics scenario
 python evaluator.py --model animatediff --data ball_drop --seed 42 --guidance_scale
+
+# PhysLoc: a release, downloaded from the Hub on first use
+python evaluator.py --model animatediff --data physloc --seed 42 --guidance_scale \
+    --physloc_hub_repo samueleruf/physloc-mini
 ```
 
 3. **Run Batch Evaluation**:
@@ -42,10 +56,18 @@ bash run_eval.sh
 ### Command Line Arguments
 
 - `--model`: Model to evaluate (e.g., `animatediff`, `cogvideox`, `hunyuan_t2v`, `ltx`, `mochi`)
-- `--data`: Physics scenario to test (e.g., `ball_drop`, `ball_collision`, `pendulum`)
+- `--data`: Benchmark to evaluate: a LikePhys scenario (e.g., `ball_drop`, `ball_collision`, `pendulum`), or `physloc`
 - `--seed`: Random seed for reproducibility
 - `--guidance_scale`: Use classifier-free guidance (flag)
 - `--tag_name`: Custom tag for organizing experiment results
+
+PhysLoc only (`--data physloc`):
+
+- `--physloc_root`: a release on disk, either downloaded/exported (`shards/`) or a generator run (`clips/`)
+- `--physloc_hub_repo`: a release to download instead, e.g. `samueleruf/physloc-mini` (into `--physloc_cache`, default `data/physloc`)
+- `--physloc_split`: only this split of a downloaded release (`main`, `held_out`, `debug`)
+- `--physloc_family`, `--physloc_scenario`, `--physloc_level`, `--physloc_condition`, `--physloc_severity_bin`: only invalid clips matching these; each pair's valid clip is always kept as the reference
+- `--physloc_repo`: a PhysLoc checkout, needed only for a generator run, which ships no `loader.py` (default: `$PHYSLOC_REPO`, then `../physloc`)
 
 ### Sample Scripts
 
@@ -66,7 +88,9 @@ python evaluator.py \
 bash run_eval.sh
 ```
 
-## Dataset
+## Datasets
+
+### LikePhys
 
 The dataset is hosted on Hugging Face and contains paired videos (physically plausible vs. implausible) across 12 different physics scenarios.
 
@@ -82,6 +106,18 @@ huggingface-cli download JianhaoDYDY/LikePhys-Benchmark --repo-type dataset --lo
 ```
 
 ![LikePhys Dataset Overview](assets/dataset.png)
+
+### PhysLoc
+
+A PhysLoc release groups clips into *pairs*: one valid clip and every invalid clip rendered from the same scene. Each pair is scored as one LikePhys subgroup, and an invalid clip's variation type is `<family>_<severity bin>` (e.g. `permanence_strong`), so the mis-rank is reported per violation family and severity.
+
+A release is read with the `loader.py` it ships, so no PhysLoc checkout is needed. To see which pairs a release yields before spending GPU time:
+
+```bash
+python -m utils.physloc_dataset --physloc_root data/physloc/samueleruf__physloc-mini
+```
+
+Releases exported before PhysLoc schema v2 (videos stored as `rgb.mp4`) cannot be read and are reported as such; re-export them with a current `physloc export`.
 
 ## Supported Models
 
