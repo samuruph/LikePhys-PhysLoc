@@ -102,7 +102,8 @@ def iter_groups(root, physloc_repo=None, split=None, **filters):
     skipped.
 
     Once the consumer moves past a pair, its clips' cached arrays are released,
-    so a long evaluation does not grow in memory.
+    so a long evaluation does not grow in memory. A release exported before
+    folders is still read, by the loader it shipped with.
     """
     loader = load_loader(root, physloc_repo)
     want = {k: v for k, v in filters.items() if v}
@@ -110,19 +111,44 @@ def iter_groups(root, physloc_repo=None, split=None, **filters):
     if unknown:
         raise TypeError("unknown filter(s) %s; known: %s" % (unknown, list(FILTERS)))
 
-    ds = loader.PhysLocDataset(root, unit="pair", split=split,
-                               fields=("video_path",), **want)
-    for pair in ds.pairs():
-        clips = [("valid", pair.valid)]
-        for clip in pair.invalids:
-            info = clip.path_info
-            clips.append(("%s_%s" % (info["family"], info["severity_bin"]), clip))
+    for pair in _pairs(loader, root, split, want):
+        clips = [("valid", pair.valid)] + [
+            ("%s_%s" % (c.family, c.severity_bin), c) for c in pair.invalids]
         clips = [(vt, c, c.video_path) for vt, c in clips]
         try:
             yield pair, clips
         finally:
-            for _, clip, _ in clips:
+            for _, clip, path in clips:
                 clip.release()
+                # Only an old shard-backed release unpacks a video to a
+                # temporary file; a folder release's path is its own file.
+                if not os.path.realpath(path).startswith(
+                        os.path.realpath(root) + os.sep):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+
+
+def _pairs(loader, root, split, want):
+    """The complete pairs `iter_groups` scores, with only the wanted invalids.
+
+    A release exported before pair mode ships a loader without it (and reads
+    its tar shards in place), so for that one the grouping is done here, on the
+    path fields that loader exposes as `fields(i)`.
+    """
+    if hasattr(loader.PhysLocDataset, "UNITS"):
+        return loader.PhysLocDataset(root, unit="pair", split=split,
+                                     fields=("video_path",), **want).pairs()
+    ds = loader.PhysLocDataset(root, split=split)
+    info = {id(c): ds.fields(i) for i, c in enumerate(ds.clips)}
+    out = []
+    for pair in ds.pairs():
+        pair.invalids = [c for c in pair.invalids
+                         if all(info[id(c)].get(k) == v for k, v in want.items())]
+        if pair.valid is not None and pair.invalids:
+            out.append(pair)
+    return out
 
 
 def main():
@@ -144,7 +170,7 @@ def main():
         groups += 1
         print("%s  %s" % (pair.pair_uid, (pair.prompt or "")[:60]))
         for variation_type, clip, _ in clips:
-            print("    %-24s %s" % (variation_type, os.path.basename(clip.path)))
+            print("    %-24s %s" % (variation_type, clip.uid.rsplit("/", 1)[-1]))
     print("\n%d group(s)" % groups)
 
 
