@@ -765,16 +765,34 @@ def evaluate_dataset(args, dataset_dir, pipe):
     return results
 
 
+def resolve_physloc_root(args):
+    """The PhysLoc release to evaluate, downloading it first if asked.
+
+    Returns the release root. Also clears `args.physloc_prompt`, which
+    `evaluate_physloc` then sets per pair from the clip's own caption.
+    """
+    if not args.physloc_root:
+        if not args.physloc_hub_repo:
+            raise ValueError(
+                "--data physloc needs --physloc_root (a release on disk) or "
+                "--physloc_hub_repo (one to download)")
+        from utils.physloc_dataset import download
+        args.physloc_root = download(args.physloc_hub_repo, args.physloc_cache)
+        print(f"Downloaded {args.physloc_hub_repo} to {args.physloc_root}")
+
+    args.physloc_prompt = None
+    return args.physloc_root
+
+
 def evaluate_physloc(args, pipe):
     """
     Evaluate a PhysLoc release. Each valid/invalid pair is a subgroup, and an
     invalid clip's variation type is `<family>_<severity bin>`, so the mis-rank
     is reported per family and severity.
     """
-    from utils.physloc_dataset import iter_groups
+    from utils.physloc_dataset import FILTERS, iter_groups
 
-    filters = {"family": args.physloc_family, "scenario": args.physloc_scenario,
-               "level": args.physloc_level}
+    filters = {name: getattr(args, "physloc_" + name) for name in FILTERS}
     results = {}
 
     for sub_idx, (pair_uid, prompt, videos) in enumerate(
@@ -1098,11 +1116,15 @@ def parse_args():
 
     # --data physloc
     parser.add_argument("--physloc_root", type=str, default=None, help="PhysLoc release: a generated one (clips/) or an exported one (shards/)")
-    parser.add_argument("--physloc_repo", type=str, default=None, help="PhysLoc checkout holding physloc/loader.py (default: $PHYSLOC_REPO, then ../physloc)")
+    parser.add_argument("--physloc_hub_repo", type=str, default=None, help="Hub dataset to download when --physloc_root is not given, e.g. samueleruf/physloc-mini")
+    parser.add_argument("--physloc_cache", type=str, default="data/physloc", help="where --physloc_hub_repo is downloaded to")
+    parser.add_argument("--physloc_repo", type=str, default=None, help="PhysLoc checkout holding physloc/loader.py, for a release that ships none (default: $PHYSLOC_REPO, then ../physloc)")
+    parser.add_argument("--physloc_split", type=str, default=None, help="only this split of an exported release (main, held_out, debug)")
     parser.add_argument("--physloc_family", type=str, default=None, help="only this violation family")
     parser.add_argument("--physloc_scenario", type=str, default=None, help="only this scenario")
     parser.add_argument("--physloc_level", type=str, default=None, help="only this complexity level (L0..L3)")
-    parser.add_argument("--physloc_split", type=str, default=None, help="only this split of an exported release (main, held_out, debug)")
+    parser.add_argument("--physloc_condition", type=str, default=None, help="only this render condition")
+    parser.add_argument("--physloc_severity_bin", type=str, default=None, help="only this severity bin (weak, medium, strong)")
     
     return parser.parse_args()
 
@@ -1131,11 +1153,7 @@ if __name__ == "__main__":
 
     # Pick the benchmark: a PhysLoc release, or one LikePhys scenario.
     if args.data == PHYSLOC:
-        if not args.physloc_root:
-            raise ValueError("--data physloc needs --physloc_root")
-        # Set per pair by evaluate_physloc, from the clip's own caption.
-        args.physloc_prompt = None
-        dataset_dir = args.physloc_root
+        dataset_dir = resolve_physloc_root(args)
         data_name = PHYSLOC
     elif args.data in LIKEPHYS_DATASETS:
         dataset_dir = LIKEPHYS_DATASETS[args.data]["dataset_dir"]
