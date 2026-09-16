@@ -7,13 +7,12 @@ up to the violation. Each invalid clip's variation type is
 `<family>_<severity bin>`, so `compute_misrank_normalized` reports one mis-rank
 per family and bin.
 
-Reading is delegated to PhysLoc's own `loader.py`, which imports nothing but
-numpy and the standard library. A downloaded (or exported) release ships that
-file at its root and it is used from there, so evaluating a release needs no
-PhysLoc checkout at all. A generator run -- a bare `clips/` tree -- has no
-shipped loader, so for those one is imported by path from a checkout
-(`--physloc_repo`, `$PHYSLOC_REPO`, or a `physloc` checkout next to this
-repository).
+Reading is done by PhysLoc's own dataloader, `physloc/loader.py` from the
+PhysLoc repository (`--physloc_repo`, `$PHYSLOC_REPO`, or a `physloc` checkout
+next to this repository). It imports nothing but numpy and the standard
+library, so it is imported by path and the generator need not be installed.
+`iter_groups` yields the loader's own `Pair` and `Clip` objects, so anything
+else the loader offers (masks, severity, timelines, ...) is one attribute away.
 
     python evaluator.py --model ltx-0.9.5 --data physloc \
         --physloc_root /path/to/physloc_release [--physloc_family permanence]
@@ -28,8 +27,8 @@ import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
-#: Where to look for `physloc/loader.py` when a root ships none and neither
-#: --physloc_repo nor $PHYSLOC_REPO is set: a checkout beside this repository.
+#: The PhysLoc checkout whose `physloc/loader.py` is used when neither
+#: --physloc_repo nor $PHYSLOC_REPO is set: one beside this repository.
 DEFAULT_REPO = os.path.join(os.path.dirname(os.path.dirname(_HERE)), "physloc")
 
 #: Path filters `iter_groups` forwards to the loader. `split` is handled
@@ -46,23 +45,13 @@ def _import_by_path(path):
     return module
 
 
-def load_loader(root, physloc_repo=None):
-    """The `loader.py` to read `root` with: the one shipped inside it if any.
-
-    A release carries the loader matching the schema it was written with, so
-    reading it with its own copy is what a downloaded release supports. Only a
-    generator run (`clips/`, nothing shipped) falls back to a checkout.
-    """
-    shipped = os.path.join(root, "loader.py")
-    if os.path.exists(shipped):
-        return _import_by_path(shipped)
-
+def load_loader(physloc_repo=None):
+    """Import `physloc/loader.py` from the PhysLoc checkout, by path."""
     repo = physloc_repo or os.environ.get("PHYSLOC_REPO") or DEFAULT_REPO
     path = os.path.join(repo, "physloc", "loader.py")
     if not os.path.exists(path):
         raise FileNotFoundError(
-            "%s ships no loader.py and there is no PhysLoc loader at %s; pass "
-            "--physloc_repo or set PHYSLOC_REPO" % (root, path))
+            "no PhysLoc loader at %s; pass --physloc_repo or set PHYSLOC_REPO" % path)
     return _import_by_path(path)
 
 
@@ -110,19 +99,21 @@ def _check_schema(ds, root, loader):
 
 
 def iter_groups(root, physloc_repo=None, split=None, **filters):
-    """Yield `(pair_uid, prompt, videos)` for every complete pair under `root`.
+    """Yield `(pair, clips)` for every complete pair under `root`.
 
-    `videos` is a list of `(variation_type, video_path, clip_uid)` with the
-    pair's valid clip first. `filters` are the loader's path filters (see
-    `FILTERS`); they select which *invalid* clips are scored, while a pair's
-    valid clip is always kept, since it is the reference the invalid ones are
-    ranked against. A pair with no surviving invalid clip is skipped.
+    `pair` is the loader's `Pair` (`pair_uid`, `prompt`, `valid`, `invalids`)
+    and `clips` a list of `(variation_type, clip, video_path)` with the pair's
+    valid clip first, `clip` being the loader's `Clip`. `filters` are the
+    loader's path filters (see `FILTERS`); they select which *invalid* clips are
+    scored, while a pair's valid clip is always kept, since it is the reference
+    the invalid ones are ranked against. A pair with no surviving invalid clip
+    is skipped.
 
-    On a release read from shards the loader unpacks each `video.mp4` to a
-    temporary file; those are deleted once the consumer moves past the pair,
-    so a long evaluation does not fill the temp directory.
+    Once the consumer moves past a pair, its clips' cached arrays are released
+    and any `video.mp4` the loader unpacked from a shard to a temporary file is
+    deleted, so a long evaluation grows neither memory nor the temp directory.
     """
-    loader = load_loader(root, physloc_repo)
+    loader = load_loader(physloc_repo)
     want = {k: {v} if isinstance(v, str) else set(v)
             for k, v in filters.items() if v}
     unknown = sorted(set(want) - set(FILTERS))
@@ -132,33 +123,27 @@ def iter_groups(root, physloc_repo=None, split=None, **filters):
     ds = loader.PhysLocDataset(root, split=split)
     _check_schema(ds, root, loader)
 
-    # One index pass, grouped by pair. The fields come from each clip's path,
-    # so filtering opens no metadata; only a kept pair's prompt is read.
-    groups, order = {}, []
-    for i, clip in enumerate(ds.clips):
-        f = ds.fields(i)
-        pair_uid = f["pair_uid"]
-        if pair_uid not in groups:
-            groups[pair_uid] = {"valid": None, "invalid": []}
-            order.append(pair_uid)
-        group = groups[pair_uid]
-        if f["label"] == "valid":
-            group["valid"] = clip
-        elif all(f.get(k) in v for k, v in want.items()):
-            group["invalid"].append(("%s_%s" % (f["family"], f["severity_bin"]), clip))
+    # The loader's path fields decide what is kept, so filtering opens no
+    # metadata. Filtering the dataset itself would drop the valid clips.
+    fields = {id(clip): ds.fields(i) for i, clip in enumerate(ds.clips)}
 
-    for pair_uid in order:
-        group = groups[pair_uid]
-        if group["valid"] is None or not group["invalid"]:
+    def variation_type(clip):
+        f = fields[id(clip)]
+        return "%s_%s" % (f["family"], f["severity_bin"])
+
+    for pair in ds.pairs():
+        invalids = [c for c in pair.invalids
+                    if all(fields[id(c)].get(k) in v for k, v in want.items())]
+        if pair.valid is None or not invalids:
             continue
 
-        clips = [("valid", group["valid"])] + group["invalid"]
-        videos = [(variation_type, clip.video_path, clip.uid)
-                  for variation_type, clip in clips]
+        clips = [("valid", pair.valid)] + [(variation_type(c), c) for c in invalids]
+        clips = [(vt, c, c.video_path) for vt, c in clips]
         try:
-            yield pair_uid, group["valid"].prompt, videos
+            yield pair, clips
         finally:
-            for _, path, _ in videos:
+            for _, clip, path in clips:
+                clip.release()
                 if _is_temp(path, root):
                     try:
                         os.remove(path)
@@ -179,12 +164,12 @@ def main():
 
     filters = {name: getattr(a, "physloc_" + name) for name in FILTERS}
     groups = 0
-    for pair_uid, prompt, videos in iter_groups(
+    for pair, clips in iter_groups(
             a.physloc_root, a.physloc_repo, split=a.physloc_split, **filters):
         groups += 1
-        print("%s  %s" % (pair_uid, (prompt or "")[:60]))
-        for variation_type, path, clip_uid in videos:
-            print("    %-24s %s" % (variation_type, os.path.basename(clip_uid)))
+        print("%s  %s" % (pair.pair_uid, (pair.prompt or "")[:60]))
+        for variation_type, clip, _ in clips:
+            print("    %-24s %s" % (variation_type, os.path.basename(clip.uid)))
     print("\n%d group(s)" % groups)
 
 

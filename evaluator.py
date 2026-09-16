@@ -795,18 +795,18 @@ def evaluate_physloc(args, pipe):
     filters = {name: getattr(args, "physloc_" + name) for name in FILTERS}
     results = {}
 
-    for sub_idx, (pair_uid, prompt, videos) in enumerate(
+    for sub_idx, (pair, clips) in enumerate(
             iter_groups(args.physloc_root, args.physloc_repo,
                         split=args.physloc_split, **filters)):
         # One seed and one caption per pair, so valid and invalid are scored alike.
         args.subgroup_seed = args.seed + sub_idx
-        args.physloc_prompt = prompt
+        args.physloc_prompt = pair.prompt
 
         subgroup_results = {}
-        for variation_type, video_path, clip_uid in videos:
+        for variation_type, clip, video_path in clips:
             loss, log_info = evaluate_video(args, video_path, pipe)
             if loss is not None:
-                subgroup_results.setdefault(variation_type, {})[clip_uid] = {
+                subgroup_results.setdefault(variation_type, {})[clip.uid] = {
                     "loss": loss,
                     "noise_pred_mean": log_info["noise_pred_mean"],
                     "true_noise_mean": log_info["true_noise_mean"],
@@ -814,7 +814,7 @@ def evaluate_physloc(args, pipe):
                 }
 
         if subgroup_results:
-            results[pair_uid] = subgroup_results
+            results[pair.pair_uid] = subgroup_results
 
     return results
 
@@ -1118,7 +1118,7 @@ def parse_args():
     parser.add_argument("--physloc_root", type=str, default=None, help="PhysLoc release: a generated one (clips/) or an exported one (shards/)")
     parser.add_argument("--physloc_hub_repo", type=str, default=None, help="Hub dataset to download when --physloc_root is not given, e.g. samueleruf/physloc-mini")
     parser.add_argument("--physloc_cache", type=str, default="data/physloc", help="where --physloc_hub_repo is downloaded to")
-    parser.add_argument("--physloc_repo", type=str, default=None, help="PhysLoc checkout holding physloc/loader.py, for a release that ships none (default: $PHYSLOC_REPO, then ../physloc)")
+    parser.add_argument("--physloc_repo", type=str, default=None, help="PhysLoc checkout whose physloc/loader.py reads the release (default: $PHYSLOC_REPO, then ../physloc)")
     parser.add_argument("--physloc_split", type=str, default=None, help="only this split of an exported release (main, held_out, debug)")
     parser.add_argument("--physloc_family", type=str, default=None, help="only this violation family")
     parser.add_argument("--physloc_scenario", type=str, default=None, help="only this scenario")

@@ -67,7 +67,7 @@ PhysLoc only (`--data physloc`):
 - `--physloc_hub_repo`: a release to download instead, e.g. `samueleruf/physloc-mini` (into `--physloc_cache`, default `data/physloc`)
 - `--physloc_split`: only this split of a downloaded release (`main`, `held_out`, `debug`)
 - `--physloc_family`, `--physloc_scenario`, `--physloc_level`, `--physloc_condition`, `--physloc_severity_bin`: only invalid clips matching these; each pair's valid clip is always kept as the reference
-- `--physloc_repo`: a PhysLoc checkout, needed only for a generator run, which ships no `loader.py` (default: `$PHYSLOC_REPO`, then `../physloc`)
+- `--physloc_repo`: the PhysLoc checkout whose `physloc/loader.py` reads the release (default: `$PHYSLOC_REPO`, then `../physloc`)
 
 ### Sample Scripts
 
@@ -111,7 +111,7 @@ huggingface-cli download JianhaoDYDY/LikePhys-Benchmark --repo-type dataset --lo
 
 A PhysLoc release groups clips into *pairs*: one valid clip and every invalid clip rendered from the same scene. Each pair is scored as one LikePhys subgroup, and an invalid clip's variation type is `<family>_<severity bin>` (e.g. `permanence_strong`), so the mis-rank is reported per violation family and severity.
 
-A release is read with the `loader.py` it ships, so no PhysLoc checkout is needed. To see which pairs a release yields before spending GPU time:
+Releases are read with PhysLoc's dataloader, `physloc/loader.py` from the PhysLoc repository (a checkout at `../physloc`, or wherever `--physloc_repo` / `$PHYSLOC_REPO` points). It needs only numpy, so the generator does not have to be installed here. `utils/physloc_dataset.py` hands the evaluator the loader's own `Pair` and `Clip` objects. To see which pairs a release yields before spending GPU time:
 
 ```bash
 python -m utils.physloc_dataset --physloc_root data/physloc/samueleruf__physloc-mini
