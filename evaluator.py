@@ -745,14 +745,15 @@ def evaluate_physloc(args, pipe):
     invalid clip's variation type is `<family>_<severity bin>`, so the mis-rank
     is reported per family and severity.
     """
-    from physloc_dataset import iter_groups
+    from utils.physloc_dataset import iter_groups
 
     filters = {"family": args.physloc_family, "scenario": args.physloc_scenario,
-               "level": args.physloc_level, "split": args.physloc_split}
+               "level": args.physloc_level}
     results = {}
 
     for sub_idx, (pair_uid, prompt, videos) in enumerate(
-            iter_groups(args.physloc_root, args.physloc_repo, **filters)):
+            iter_groups(args.physloc_root, args.physloc_repo,
+                        split=args.physloc_split, **filters)):
         # One seed and one caption per pair, so valid and invalid are scored alike.
         args.subgroup_seed = args.seed + sub_idx
         args.physloc_prompt = prompt
