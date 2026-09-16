@@ -80,3 +80,5 @@ backburn/
 
 # Data folder (hosted on Hugging Face)
 data/
+cache/
+results/
