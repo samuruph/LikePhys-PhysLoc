@@ -64,11 +64,11 @@ bash run_eval_physloc.sh    # every model on PhysLoc releases (see the script)
 
 PhysLoc only (`--data physloc`):
 
-- `--physloc_root`: a release on disk, either downloaded/exported (`shards/`) or a generator run (`clips/`)
+- `--physloc_root`: a release on disk, downloaded/exported or a generator run -- both are `clips/` folders
 - `--physloc_hub_repo`: a release to download instead, e.g. `samueleruf/physloc-mini` (into `--physloc_cache`, default `data/physloc`)
 - `--physloc_split`: only this split of a downloaded release (`main`, `held_out`, `debug`)
 - `--physloc_family`, `--physloc_scenario`, `--physloc_level`, `--physloc_condition`, `--physloc_severity_bin`: only invalid clips matching these; each pair's valid clip is always kept as the reference
-- `--physloc_repo`: the PhysLoc checkout whose `physloc/loader.py` reads the release (default: `$PHYSLOC_REPO`, then `../physloc`)
+- `--physloc_repo`: the PhysLoc checkout whose `physloc/loader.py` reads a release that ships no `loader.py`; a downloaded release is read with its own (default: `$PHYSLOC_REPO`, then `../physloc`)
 
 ### Sample Scripts
 

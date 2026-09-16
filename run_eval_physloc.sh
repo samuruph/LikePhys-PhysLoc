@@ -4,9 +4,10 @@
 #   bash run_eval_physloc.sh                                   # the releases listed below
 #   PHYSLOC_ROOTS="data/physloc/a data/physloc/b" bash run_eval_physloc.sh
 #
-# A release is a downloaded/exported one (shards/) or a generator run (clips/).
-# It is read with physloc/loader.py from the PhysLoc checkout: set
-# PHYSLOC_REPO if that is not ../physloc.
+# A release is a downloaded/exported one or a generator run -- both are clips/
+# folders. A download is read with the loader.py it ships; a generator run with
+# physloc/loader.py from the PhysLoc checkout: set PHYSLOC_REPO if that is not
+# ../physloc.
 GPUS=(0 1 2 3 4 5 6 7)
 
 SEEDS=(42)

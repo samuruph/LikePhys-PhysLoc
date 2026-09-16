@@ -1116,10 +1116,10 @@ def parse_args():
     parser.add_argument("--prompt_exp", type=str, default="no", help="for prompt exp")
 
     # --data physloc
-    parser.add_argument("--physloc_root", type=str, default=None, help="PhysLoc release: a generated one (clips/) or an exported one (shards/)")
+    parser.add_argument("--physloc_root", type=str, default=None, help="PhysLoc release on disk: downloaded/exported or a generator run, both clips/ folders")
     parser.add_argument("--physloc_hub_repo", type=str, default=None, help="Hub dataset to download when --physloc_root is not given, e.g. samueleruf/physloc-mini")
     parser.add_argument("--physloc_cache", type=str, default="data/physloc", help="where --physloc_hub_repo is downloaded to")
-    parser.add_argument("--physloc_repo", type=str, default=None, help="PhysLoc checkout whose physloc/loader.py reads the release (default: $PHYSLOC_REPO, then ../physloc)")
+    parser.add_argument("--physloc_repo", type=str, default=None, help="PhysLoc checkout whose physloc/loader.py reads a release that ships no loader.py (default: $PHYSLOC_REPO, then ../physloc)")
     parser.add_argument("--physloc_split", type=str, default=None, help="only this split of an exported release (main, held_out, debug)")
     parser.add_argument("--physloc_family", type=str, default=None, help="only this violation family")
     parser.add_argument("--physloc_scenario", type=str, default=None, help="only this scenario")
