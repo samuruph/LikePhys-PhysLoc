@@ -31,53 +31,79 @@ from diffusers.utils.torch_utils import randn_tensor
 import json
 import argparse
 
+# ---------------------------------------------------------------------------
+# Two benchmarks share this evaluator, and only the data loading differs.
+#
+#   LikePhys (--data ball_drop, pendulum, ...)
+#       a directory of mp4 subgroups per scenario, one fixed caption for the
+#       whole scenario; listed in LIKEPHYS_PROMPTS / LIKEPHYS_DATASETS and
+#       scored by `evaluate_dataset`.
+#
+#   PhysLoc (--data physloc)
+#       a release read through PhysLoc's own loader, one caption per clip;
+#       scored by `evaluate_physloc` via `utils/physloc_dataset.py`.
+#
+# Everything downstream of "a caption and a video path" -- the model, the
+# sampling, the loss, the mis-rank -- is shared, and identical for both.
+# ---------------------------------------------------------------------------
+
+#: The value of --data that selects the PhysLoc benchmark; any other value
+#: names a LikePhys scenario.
+PHYSLOC = "physloc"
+
+#: One fixed caption per LikePhys scenario. PhysLoc has none here: every clip
+#: ships its own, which `evaluate_physloc` puts in `args.physloc_prompt`.
+LIKEPHYS_PROMPTS = {
+    "ball_drop": "ball dropping and colliding with the ground, in empty background",
+    "ball_collision": "two balls colliding with each other",
+    "pendulum": "a pendulum swinging",
+    "block_slide": "a block sliding on a slope",
+    "fluid": "a droplet falling",
+    "faucet": "fluid flowing from a faucet",
+    "cloth": "a piece of cloth dropping to the obstacle on the ground",
+    "flag": "a piece of cloth waving in the wind",
+    "river": "fluid flowing in a tank with obstacles",
+    "shadow": "light source moving around an object showing its shadow",
+    "pyramid": "a cube crash into a pile of spheres",
+    "shadowm": "camera moving around an object",
+    "sample": "two balls colliding with each other",
+}
+
+#: Where each LikePhys scenario's videos live, and the name its results are
+#: filed under. PhysLoc's equivalent is --physloc_root, resolved per run.
+LIKEPHYS_DATASETS = {
+    "ball_drop": {"dataset_dir": "./data/ball_drop_videos", "data_name": "ball_drop"},
+    "ball_collision": {"dataset_dir": "./data/ball_collision_videos", "data_name": "ball_collision"},
+    "pendulum": {"dataset_dir": "./data/pendulum_videos", "data_name": "pendulum"},
+    "block_slide": {"dataset_dir": "./data/block_slide_videos", "data_name": "block_slide"},
+    "fluid": {"dataset_dir": "./data/fluid_videos", "data_name": "fluid"},
+    "faucet": {"dataset_dir": "./data/faucet_videos", "data_name": "faucet"},
+    "cloth": {"dataset_dir": "./data/cloth_drape_videos", "data_name": "cloth"},
+    "flag": {"dataset_dir": "./data/flag_videos", "data_name": "flag"},
+    "river": {"dataset_dir": "./data/river_videos", "data_name": "river"},
+    "shadow": {"dataset_dir": "./data/shadow_videos", "data_name": "shadow"},
+    "pyramid": {"dataset_dir": "./data/pyramid_videos", "data_name": "pyramid"},
+    "shadowm": {"dataset_dir": "./data/shadow_camera_videos", "data_name": "shadowm"},
+    "sample": {"dataset_dir": "./data/abluse", "data_name": "abluse"},
+}
+
+#: Shared by both benchmarks.
+NEGATIVE_PROMPT = "worst quality, inconsistent motion, blurry, jittery, distorted"
+
+
 def get_prompt(args):
-    if args.data == "physloc":
-        # Every PhysLoc clip carries its own caption; evaluate_physloc sets it per pair.
-        return args.physloc_prompt, "worst quality, inconsistent motion, blurry, jittery, distorted"
-    if args.data == "ball_drop":
-        prompt = "ball dropping and colliding with the ground, in empty background"
-        # negative_prompt = "violate physics"
-    elif args.data == "ball_collision":
-        prompt = "two balls colliding with each other"
-        # negative_prompt = "violate physics"
-    elif args.data == "pendulum":
-        prompt = "a pendulum swinging"
-        # negative_prompt = "violate physics"
-    elif args.data == "block_slide":
-        prompt = "a block sliding on a slope"
-        # negative_prompt = "violate physics"
-    elif args.data == "fluid":
-        prompt = "a droplet falling"
-        # negative_prompt = "violate physics"
-    elif args.data == "faucet":
-        prompt = "fluid flowing from a faucet"
-        # negative_prompt = "violate physics"
-    elif args.data == "cloth":
-        prompt = "a piece of cloth dropping to the obstacle on the ground"
-        # negative_prompt = "violate physics"
-    elif args.data == "flag":
-        prompt = "a piece of cloth waving in the wind"
-        # negative_prompt = "violate physics"
-    elif args.data == "river":
-        prompt = "fluid flowing in a tank with obstacles"
-        # negative_prompt = "violate physics"
-    elif args.data == "shadow":
-        prompt = "light source moving around an object showing its shadow"
-        # negative_prompt = "violate physics"
-    elif args.data == "pyramid":
-        prompt = "a cube crash into a pile of spheres"
-        # negative_prompt = "violate physics"
-    elif args.data == "shadowm":
-        prompt = "camera moving around an object"
-        # negative_prompt = "violate physics"
-    elif args.data == 'sample':
-        prompt = 'two balls colliding with each other'
-    negative_prompt = "worst quality, inconsistent motion, blurry, jittery, distorted"
+    """The caption to score the current clip under, and the negative prompt.
 
-    return prompt, negative_prompt
+    A LikePhys scenario has one caption for all of its videos. A PhysLoc clip
+    ships its own, so `evaluate_physloc` sets `args.physloc_prompt` per pair
+    before scoring it.
+    """
+    if args.data == PHYSLOC:
+        prompt = args.physloc_prompt
+    else:
+        prompt = LIKEPHYS_PROMPTS[args.data]
 
-
+    return prompt, NEGATIVE_PROMPT
 
 
 def load_video_and_first_frame(pipe, video_path, height, width, num_frames):
@@ -1054,7 +1080,7 @@ def parse_args():
     parser.add_argument("--model", type=str, default="svd")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
-    parser.add_argument("--data", type=str, default="ball_drop", help="Data configuration to use")
+    parser.add_argument("--data", type=str, default="ball_drop", help="Benchmark to evaluate: 'physloc' for a PhysLoc release (see --physloc_root), or a LikePhys scenario such as ball_drop or pendulum")
     parser.add_argument("--guidance_scale", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--num_frames", type=int, default=-1, help="Number of frames to evaluate")
     parser.add_argument("--height", type=int, default=-1, help="Height of the video")
@@ -1103,75 +1129,21 @@ if __name__ == "__main__":
     args.width = args.width * args.size_scale
     args.height = args.height * args.size_scale
 
-    # Data configuration for different datasets
-    data_config = {
-        "ball_drop": {
-            "dataset_dir": "./data/ball_drop_videos",
-            "data_name": "ball_drop"
-        },
-        "ball_collision": {
-            "dataset_dir": "./data/ball_collision_videos",
-            "data_name": "ball_collision"
-        },
-        "pendulum": {
-            "dataset_dir": "./data/pendulum_videos",
-            "data_name": "pendulum"
-        },
-        "block_slide": {
-            "dataset_dir": "./data/block_slide_videos",
-            "data_name": "block_slide"
-        },
-        "fluid": {
-            "dataset_dir": "./data/fluid_videos",
-            "data_name": "fluid"
-        },
-        "faucet": {
-            "dataset_dir": "./data/faucet_videos",
-            "data_name": "faucet"
-        },
-        "cloth": {
-            "dataset_dir": "./data/cloth_drape_videos",
-            "data_name": "cloth"
-        },
-        "flag": {
-            "dataset_dir": "./data/flag_videos",
-            "data_name": "flag"
-        },
-        "river": {
-            "dataset_dir": "./data/river_videos",
-            "data_name": "river"
-        },
-        "shadow": {
-            "dataset_dir": "./data/shadow_videos",
-            "data_name": "shadow"
-        },
-        "pyramid": {
-            "dataset_dir": "./data/pyramid_videos",
-            "data_name": "pyramid"
-        },
-        "shadowm": {
-            "dataset_dir": "./data/shadow_camera_videos",
-            "data_name": "shadowm"
-        },
-        'sample':{
-            'dataset_dir': "./data/abluse",
-            'data_name':'abluse'
-        }
-    }
-
-    # PhysLoc is read through its own loader rather than a directory of mp4s
-    if args.data == "physloc":
+    # Pick the benchmark: a PhysLoc release, or one LikePhys scenario.
+    if args.data == PHYSLOC:
         if not args.physloc_root:
             raise ValueError("--data physloc needs --physloc_root")
-        data_config["physloc"] = {"dataset_dir": args.physloc_root, "data_name": "physloc"}
-
-    # Validate data choice
-    if args.data not in data_config:
-        raise ValueError(f"Invalid data configuration: {args.data}. Available options: {list(data_config.keys())}")
-    
-    current_data_config = data_config[args.data]
-    dataset_dir = current_data_config["dataset_dir"]
-    data_name = current_data_config["data_name"]
+        # Set per pair by evaluate_physloc, from the clip's own caption.
+        args.physloc_prompt = None
+        dataset_dir = args.physloc_root
+        data_name = PHYSLOC
+    elif args.data in LIKEPHYS_DATASETS:
+        dataset_dir = LIKEPHYS_DATASETS[args.data]["dataset_dir"]
+        data_name = LIKEPHYS_DATASETS[args.data]["data_name"]
+    else:
+        raise ValueError(
+            f"Invalid data configuration: {args.data}. Available options: "
+            f"{[PHYSLOC] + list(LIKEPHYS_DATASETS)}")
 
     # Experiment naming
     cfg_tag = "cfg" if args.guidance_scale else "no_cfg"
@@ -1221,8 +1193,9 @@ if __name__ == "__main__":
     # Set global seed
     _ = set_seed(args.seed)
 
-    # Run evaluation
-    if args.data == "physloc":
+    # Run evaluation. The two benchmarks differ only in how clips are grouped
+    # and captioned; both score every video with `evaluate_video`.
+    if args.data == PHYSLOC:
         results = evaluate_physloc(args, pipe)
     else:
         results = evaluate_dataset(args, dataset_dir, pipe)
