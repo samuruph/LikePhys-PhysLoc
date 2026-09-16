@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-GPUS=(0 1 2 3 4 5 6 7)
+GPUS=(0) # 1 2 3 4 5 6 7)
+
 NGPUS=${#GPUS[@]}
 
 SEEDS=(42)
 # LikePhys scenarios, each a folder of videos under ./data
 DATASETS=(ball_drop ball_collision pendulum block_slide pyramid fluid faucet river flag cloth shadow shadowm)
 MODELS=(animatediff zeroscope modelscope wan2.1-T2V-1.3b hunyuan_t2v ltx-0.9.5 animatediff_sdxl cogvideox mochi cogvideox-5b wan2.1-T2V-14b)
+MODELS=(wan2.1-T2V-1.3b)
 FLAGS=("--guidance_scale")
 
 declare -A GPU_PIDS

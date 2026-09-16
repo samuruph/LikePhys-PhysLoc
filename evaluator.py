@@ -72,19 +72,19 @@ LIKEPHYS_PROMPTS = {
 #: Where each LikePhys scenario's videos live, and the name its results are
 #: filed under. PhysLoc's equivalent is --physloc_root, resolved per run.
 LIKEPHYS_DATASETS = {
-    "ball_drop": {"dataset_dir": "./data/ball_drop_videos", "data_name": "ball_drop"},
-    "ball_collision": {"dataset_dir": "./data/ball_collision_videos", "data_name": "ball_collision"},
-    "pendulum": {"dataset_dir": "./data/pendulum_videos", "data_name": "pendulum"},
-    "block_slide": {"dataset_dir": "./data/block_slide_videos", "data_name": "block_slide"},
-    "fluid": {"dataset_dir": "./data/fluid_videos", "data_name": "fluid"},
-    "faucet": {"dataset_dir": "./data/faucet_videos", "data_name": "faucet"},
+    "ball_drop": {"dataset_dir": "./data/likephys/ball_drop_videos", "data_name": "ball_drop"},
+    "ball_collision": {"dataset_dir": "./data/likephys/ball_collision_videos", "data_name": "ball_collision"},
+    "pendulum": {"dataset_dir": "./data/likephys/pendulum_videos", "data_name": "pendulum"},
+    "block_slide": {"dataset_dir": "./data/likephys/block_slide_videos", "data_name": "block_slide"},
+    "fluid": {"dataset_dir": "./data/likephys/fluid_videos", "data_name": "fluid"},
+    "faucet": {"dataset_dir": "./data/likephys/faucet_videos", "data_name": "faucet"},
     "cloth": {"dataset_dir": "./data/cloth_drape_videos", "data_name": "cloth"},
     "flag": {"dataset_dir": "./data/flag_videos", "data_name": "flag"},
-    "river": {"dataset_dir": "./data/river_videos", "data_name": "river"},
-    "shadow": {"dataset_dir": "./data/shadow_videos", "data_name": "shadow"},
-    "pyramid": {"dataset_dir": "./data/pyramid_videos", "data_name": "pyramid"},
-    "shadowm": {"dataset_dir": "./data/shadow_camera_videos", "data_name": "shadowm"},
-    "sample": {"dataset_dir": "./data/abluse", "data_name": "abluse"},
+    "river": {"dataset_dir": "./data/likephys/river_videos", "data_name": "river"},
+    "shadow": {"dataset_dir": "./data/likephys/shadow_videos", "data_name": "shadow"},
+    "pyramid": {"dataset_dir": "./data/likephys/pyramid_videos", "data_name": "pyramid"},
+    "shadowm": {"dataset_dir": "./data/likephys/shadow_camera_videos", "data_name": "shadowm"},
+    "sample": {"dataset_dir": "./data/likephys/sample_videos", "data_name": "sample"},
 }
 
 #: Shared by both benchmarks.
@@ -732,8 +732,7 @@ def evaluate_likephys(args, dataset_dir, pipe):
     Store per-video losses without averaging.
     """
     results = {}
-    
-    for sub_idx, subgroup_id in enumerate(sorted(os.listdir(dataset_dir))):
+    for sub_idx, subgroup_id in tqdm(enumerate(sorted(os.listdir(dataset_dir))), desc="Evaluating subgroups"):
         subgroup_path = os.path.join(dataset_dir, subgroup_id)
         if not os.path.isdir(subgroup_path):
             continue
@@ -795,15 +794,15 @@ def evaluate_physloc(args, pipe):
     filters = {name: getattr(args, "physloc_" + name) for name in FILTERS}
     results = {}
 
-    for sub_idx, (pair, clips) in enumerate(
+    for sub_idx, (pair, clips) in tqdm(enumerate(
             iter_groups(args.physloc_root, args.physloc_repo,
-                        split=args.physloc_split, **filters)):
+                        split=args.physloc_split, **filters)), desc="Evaluating PhysLoc pairs"):
         # One seed and one caption per pair, so valid and invalid are scored alike.
         args.subgroup_seed = args.seed + sub_idx
         args.physloc_prompt = pair.prompt
 
         subgroup_results = {}
-        for variation_type, clip, video_path in clips:
+        for variation_type, clip, video_path in tqdm(clips, desc=f"Evaluating {pair.pair_uid}"):
             loss, log_info = evaluate_video(args, video_path, pipe)
             if loss is not None:
                 subgroup_results.setdefault(variation_type, {})[clip.uid] = {

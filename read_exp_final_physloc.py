@@ -4,7 +4,7 @@ import json
 import numpy as np
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
-BASE_DIR = "./results/evaluation_t10_uniform_42_cfg_final_samueleruf__physloc-mini"
+BASE_DIR = "./results/evaluation_t10_uniform_42_cfg_final_physloc-review_L0_f37"
 # ────────────────────────────────────────────────────────────────────────────────
 
 # Model name mapping for display (keys must match JSON filenames)
