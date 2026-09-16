@@ -50,7 +50,8 @@ python evaluator.py --model animatediff --data physloc --seed 42 --guidance_scal
 
 3. **Run Batch Evaluation**:
 ```bash
-bash run_eval.sh
+bash run_eval_likephys.sh   # every model on every LikePhys scenario
+bash run_eval_physloc.sh    # every model on PhysLoc releases (see the script)
 ```
 
 ### Command Line Arguments
@@ -84,8 +85,11 @@ python evaluator.py \
 
 #### Batch Evaluation
 ```bash
-# Run comprehensive evaluation across all models and scenarios
-bash run_eval.sh
+# LikePhys: all models across all scenarios
+bash run_eval_likephys.sh
+
+# PhysLoc: all models on each release in PHYSLOC_ROOTS (space-separated)
+PHYSLOC_ROOTS="data/physloc/samueleruf__physloc-mini" bash run_eval_physloc.sh
 ```
 
 ## Datasets
