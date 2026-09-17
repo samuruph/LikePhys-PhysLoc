@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 import os
 import json
+import csv
 import numpy as np
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 BASE_DIR = "./results/evaluation_t10_uniform_42_cfg_final"
+CSV_OUT = os.path.join(BASE_DIR, "dataset_avgs_table.csv")
+PLOT_OUT = os.path.join(BASE_DIR, "dataset_avgs_plot.png")
 # ────────────────────────────────────────────────────────────────────────────────
 
 # Model name mapping for display (keys must match JSON filenames)
@@ -71,6 +74,58 @@ def compute_misrank_normalized(results, dataset_name):
             raise ValueError(f"No valid ratios found for dataset '{dataset_name}', variation '{var}'")
         out[var] = float(np.mean(ratios))
     return out
+
+def write_csv_table(path, sorted_models, all_datasets, dataset_model_avg, model_overall):
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            ["Model"]
+            + [ds.replace("_", " ").title() for ds in all_datasets]
+            + ["Overall"]
+        )
+        for m in sorted_models:
+            disp = name_map.get(m, m.replace("_", " ").title())
+            row = [disp]
+            for ds in all_datasets:
+                v = dataset_model_avg[ds].get(m, np.nan)
+                row.append("" if np.isnan(v) else f"{v * 100:.1f}")
+            overall = model_overall.get(m, np.nan)
+            row.append("" if np.isnan(overall) else f"{overall * 100:.1f}")
+            writer.writerow(row)
+
+def save_summary_plot(path, sorted_models, all_datasets, dataset_model_avg, model_overall):
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("Skipping plot save: matplotlib is not installed.")
+        return False
+
+    labels = [name_map.get(m, m.replace("_", " ").title()) for m in sorted_models]
+    y = np.arange(len(sorted_models))
+
+    fig_height = max(6, 0.45 * len(sorted_models) + 2)
+    fig, ax = plt.subplots(figsize=(12, fig_height))
+
+    overall_values = [model_overall.get(m, np.nan) * 100 for m in sorted_models]
+    ax.barh(y, overall_values, color="#4c78a8", label="Overall")
+
+    for ds in all_datasets:
+        values = [dataset_model_avg[ds].get(m, np.nan) * 100 for m in sorted_models]
+        ax.plot(values, y, marker="o", linewidth=1.5, markersize=4, label=ds.replace("_", " ").title())
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+    ax.set_xlabel("Average mis-rank (%)")
+    ax.set_title("Average mis-rank by model (lower is better)")
+    ax.grid(axis="x", linestyle="--", alpha=0.35)
+    ax.legend(loc="lower right", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+    return True
 
 def main():
     # 1) Load and compute per-variation mis-rank
@@ -148,7 +203,15 @@ def main():
         ]
         col_rankings[ds] = sorted(vals, key=lambda x: x[1])
 
-    # 7) Print LaTeX table of dataset-level averages
+    # 7) Save CSV table and plot of dataset-level averages for inspection
+    write_csv_table(CSV_OUT, sorted_models, all_datasets, dataset_model_avg, model_overall)
+    plot_saved = save_summary_plot(PLOT_OUT, sorted_models, all_datasets, dataset_model_avg, model_overall)
+    print(f"\nSaved CSV table to: {CSV_OUT}")
+    if plot_saved:
+        print(f"Saved plot to: {PLOT_OUT}")
+    print()
+
+    # 8) Print LaTeX table of dataset-level averages
     print(r"\begin{table}[ht]")
     print(r"  \centering")
     print(r"  \caption{Average mis-rank (\%) by model and dataset (lower is better).}")
@@ -182,7 +245,7 @@ def main():
     print(r"  \label{tab:dataset_avgs}")
     print(r"\end{table}")
     
-    # 8) Print overall ranking for verification (similar to read_exp_v2.py)
+    # 9) Print overall ranking for verification (similar to read_exp_v2.py)
     print(f"\n{'='*60}")
     print(f"OVERALL MODEL RANKING ({RANKING_METHOD.upper()})")
     print(f"{'='*60}")
