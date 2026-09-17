@@ -50,6 +50,7 @@ import argparse
 #: The value of --data that selects the PhysLoc benchmark; any other value
 #: names a LikePhys scenario.
 PHYSLOC = "physloc"
+PHYSLOC_FILTERS = ("family", "scenario", "level", "condition", "severity_bin")
 
 #: One fixed caption per LikePhys scenario. PhysLoc has none here: every clip
 #: ships its own, which `evaluate_physloc` puts in `args.physloc_prompt`.
@@ -775,12 +776,55 @@ def resolve_physloc_root(args):
             raise ValueError(
                 "--data physloc needs --physloc_root (a release on disk) or "
                 "--physloc_hub_repo (one to download)")
-        from utils.physloc_dataset import download
-        args.physloc_root = download(args.physloc_hub_repo, args.physloc_cache)
+        from huggingface_hub import snapshot_download
+        local = os.path.join(args.physloc_cache, args.physloc_hub_repo.replace("/", "__"))
+        args.physloc_root = snapshot_download(
+            repo_id=args.physloc_hub_repo, repo_type="dataset", local_dir=local)
         print(f"Downloaded {args.physloc_hub_repo} to {args.physloc_root}")
 
     args.physloc_prompt = None
     return args.physloc_root
+
+
+def _filter_choices(value):
+    if isinstance(value, (str, int, float)) or value is None:
+        return {None if value is None else str(value)}
+    return {None if item is None else str(item) for item in value}
+
+
+def _physloc_sample_matches(sample, filters):
+    for name, value in filters.items():
+        if str(getattr(sample, name)) not in _filter_choices(value):
+            return False
+    return True
+
+
+def iter_physloc_groups(root, split=None, **filters):
+    """Yield evaluator groups from the copied PhysLoc schema-v3 dataloader."""
+    from utils.physloc_dataset import PhysLocDataset
+
+    want = {k: v for k, v in filters.items() if v}
+    unknown = sorted(set(want) - set(PHYSLOC_FILTERS))
+    if unknown:
+        raise TypeError(
+            f"unknown PhysLoc filter(s) {unknown}; known: {list(PHYSLOC_FILTERS)}")
+
+    dataset = PhysLocDataset(
+        root, unit="pair", split=split, fields=("observations.rgb_path",))
+    for pair in dataset.pairs():
+        invalids = [sample for sample in pair.invalids
+                    if _physloc_sample_matches(sample, want)]
+        if not invalids:
+            continue
+        clips = [("valid", pair.valid, pair.valid.video_path)]
+        clips.extend(
+            (f"{sample.family}_{sample.severity_bin}", sample, sample.video_path)
+            for sample in invalids)
+        try:
+            yield pair, clips
+        finally:
+            for _, sample, _ in clips:
+                sample.release()
 
 
 def evaluate_physloc(args, pipe):
@@ -789,23 +833,21 @@ def evaluate_physloc(args, pipe):
     invalid clip's variation type is `<family>_<severity bin>`, so the mis-rank
     is reported per family and severity.
     """
-    from utils.physloc_dataset import FILTERS, iter_groups
-
-    filters = {name: getattr(args, "physloc_" + name) for name in FILTERS}
+    filters = {name: getattr(args, "physloc_" + name) for name in PHYSLOC_FILTERS}
     results = {}
 
     for sub_idx, (pair, clips) in tqdm(enumerate(
-            iter_groups(args.physloc_root, args.physloc_repo,
-                        split=args.physloc_split, **filters)), desc="Evaluating PhysLoc pairs"):
+            iter_physloc_groups(args.physloc_root, split=args.physloc_split, **filters)),
+            desc="Evaluating PhysLoc pairs"):
         # One seed and one caption per pair, so valid and invalid are scored alike.
         args.subgroup_seed = args.seed + sub_idx
         args.physloc_prompt = pair.prompt
 
         subgroup_results = {}
-        for variation_type, clip, video_path in tqdm(clips, desc=f"Evaluating {pair.pair_uid}"):
+        for variation_type, sample, video_path in tqdm(clips, desc=f"Evaluating {pair.pair_uid}"):
             loss, log_info = evaluate_video(args, video_path, pipe)
             if loss is not None:
-                subgroup_results.setdefault(variation_type, {})[clip.uid] = {
+                subgroup_results.setdefault(variation_type, {})[sample.uid] = {
                     "loss": loss,
                     "noise_pred_mean": log_info["noise_pred_mean"],
                     "true_noise_mean": log_info["true_noise_mean"],
@@ -1115,11 +1157,10 @@ def parse_args():
     parser.add_argument("--prompt_exp", type=str, default="no", help="for prompt exp")
 
     # --data physloc
-    parser.add_argument("--physloc_root", type=str, default=None, help="PhysLoc release on disk: downloaded/exported or a generator run, both clips/ folders")
+    parser.add_argument("--physloc_root", type=str, default=None, help="PhysLoc schema-v3 release on disk")
     parser.add_argument("--physloc_hub_repo", type=str, default=None, help="Hub dataset to download when --physloc_root is not given, e.g. samueleruf/physloc-mini")
     parser.add_argument("--physloc_cache", type=str, default="data/physloc", help="where --physloc_hub_repo is downloaded to")
-    parser.add_argument("--physloc_repo", type=str, default=None, help="PhysLoc checkout whose physloc/loader.py reads a release that ships no loader.py (default: $PHYSLOC_REPO, then ../physloc)")
-    parser.add_argument("--physloc_split", type=str, default=None, help="only this split of an exported release (main, held_out, debug)")
+    parser.add_argument("--physloc_split", type=str, default=None, help="only this split of a PhysLoc release (main, held_out, debug)")
     parser.add_argument("--physloc_family", type=str, default=None, help="only this violation family")
     parser.add_argument("--physloc_scenario", type=str, default=None, help="only this scenario")
     parser.add_argument("--physloc_level", type=str, default=None, help="only this complexity level (L0..L3)")
