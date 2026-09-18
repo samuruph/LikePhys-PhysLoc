@@ -35,6 +35,9 @@ from utils.physloc_metrics import (
     normalize_difficulty, parse_score_groups, sampled_frame_indices,
     temporal_metrics,
 )
+from utils.physloc_reporting import (
+    category_summaries, severity_sensitivity, tidy_rows, write_csv,
+)
 
 # ---------------------------------------------------------------------------
 # Two benchmarks share this evaluator, and only the data loading differs.
@@ -1438,16 +1441,25 @@ if __name__ == "__main__":
     else:
         results = evaluate_likephys(args, dataset_dir, pipe)
     misrank_metrics = compute_misrank_normalized(results)
+    analysis_rows = tidy_rows(results) if args.data == PHYSLOC else []
+    category_metrics = category_summaries(analysis_rows) if analysis_rows else []
+    severity_metrics = severity_sensitivity(analysis_rows) if analysis_rows else {
+        "matched_groups": [], "by_score": []}
     
     # Combine and save
     final_results = {
         "scene_evaluations": results,
         "misrank_metrics": misrank_metrics,
+        "category_metrics": category_metrics,
+        "severity_sensitivity": severity_metrics,
         "configuration": {
             "score_groups": list(args.score_groups),
             "visualizations_written": bool(args.visualize and args.data == PHYSLOC),
         },
     }
+    if analysis_rows:
+        analysis_dir = os.path.join(os.path.dirname(output_file), "analysis", "data")
+        write_csv(os.path.join(analysis_dir, f"metrics_{args.model}.csv"), analysis_rows)
     with open(output_file, "w") as f:
         json.dump(final_results, f, indent=2)
     print(f"\nResults saved to {output_file}")
