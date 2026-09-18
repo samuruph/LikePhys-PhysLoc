@@ -33,6 +33,9 @@ def evaluate(args: object, dataset_dir: str, pipe: object,
                 "true_noise_mean": log_info["true_noise_mean"],
                 "loss_array": log_info["loss_array"],
             }
+            if "evaluation_time_seconds" in log_info:
+                subgroup_results[variation][video_name][
+                    "evaluation_time_seconds"] = log_info["evaluation_time_seconds"]
         if subgroup_results:
             results[subgroup_id] = subgroup_results
     return results

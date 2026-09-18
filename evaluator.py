@@ -3,27 +3,28 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import cv2
 import numpy as np
 import random
+import time
 from PIL import Image
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from diffusers import AutoencoderKLWan, HunyuanVideoTransformer3DModel
 from diffusers import DPMSolverMultistepScheduler, DDIMScheduler, MotionAdapter
-from pipeline.svd_pipeline import StableVideoDiffusionPipeline, retrieve_timesteps, _append_dims
-from pipeline.animatediff_pipeline import AnimateDiffPipeline
-from pipeline.animatediffsdxl_pipeline import AnimateDiffSDXLPipeline
-# from pipeline.cogvideox_pipeline import CogVideoXPipeline
-from pipeline.cogvideox_new_pipeline import CogVideoXPipeline
-# from pipeline.zeroscope_pipeline import TextToVideoSDPipeline
-from pipeline.modelscope_pipeline import TextToVideoSDPipeline
-from pipeline.wan_pipeline import WanVideoToVideoPipeline
-from pipeline.hunyuan_i2v_pipeline import HunyuanVideoImageToVideoPipeline
-from pipeline.hunyuan_t2v_pipeline import HunyuanVideoPipeline, DEFAULT_PROMPT_TEMPLATE
-from pipeline.mochi_pipeline import MochiPipeline
-from pipeline.ltx_pipeline import LTXPipeline
-# from pipeline.cosmos_pipeline import CosmosTextToWorldPipeline
-from scheduler.euler_discrete import EulerDiscreteScheduler
-from scheduler.unipc_multistep import UniPCMultistepScheduler
+from models.pipeline.svd_pipeline import StableVideoDiffusionPipeline, retrieve_timesteps, _append_dims
+from models.pipeline.animatediff_pipeline import AnimateDiffPipeline
+from models.pipeline.animatediffsdxl_pipeline import AnimateDiffSDXLPipeline
+# from models.pipeline.cogvideox_pipeline import CogVideoXPipeline
+from models.pipeline.cogvideox_new_pipeline import CogVideoXPipeline
+# from models.pipeline.zeroscope_pipeline import TextToVideoSDPipeline
+from models.pipeline.modelscope_pipeline import TextToVideoSDPipeline
+from models.pipeline.wan_pipeline import WanVideoToVideoPipeline
+from models.pipeline.hunyuan_i2v_pipeline import HunyuanVideoImageToVideoPipeline
+from models.pipeline.hunyuan_t2v_pipeline import HunyuanVideoPipeline, DEFAULT_PROMPT_TEMPLATE
+from models.pipeline.mochi_pipeline import MochiPipeline
+from models.pipeline.ltx_pipeline import LTXPipeline
+# from models.pipeline.cosmos_pipeline import CosmosTextToWorldPipeline
+from models.scheduler.euler_discrete import EulerDiscreteScheduler
+from models.scheduler.unipc_multistep import UniPCMultistepScheduler
 from accelerate import Accelerator
 from diffusers.utils import export_to_video, load_image, load_video
 from diffusers.utils.torch_utils import randn_tensor
@@ -1009,6 +1010,10 @@ def parse_args():
         help=("PhysLoc: write per-clip MP4/PNG and pair PNG artifacts; "
               "LikePhys: save the legacy denoising preview"))
     parser.add_argument(
+        "--measure-time", "--measure_time", "--masure-time",
+        dest="measure_time", action="store_true",
+        help="Print running per-video evaluation time and save timing statistics")
+    parser.add_argument(
         "--scores", action="append", default=None,
         help=("PPE score groups, repeatable or comma-separated: base_ppe, "
               "temporal_ppe, spatial_ppe, spatiotemporal_ppe, all "
@@ -1106,7 +1111,9 @@ if __name__ == "__main__":
             if ("scene_evaluations" in saved and "misrank_metrics" in saved
                     and requested <= completed and root_matches
                     and (not args.visualize or saved.get("configuration", {}).get(
-                        "visualizations_written", False))):
+                        "visualizations_written", False))
+                    and (not args.measure_time or saved.get("configuration", {}).get(
+                        "timing", {}).get("enabled", False))):
                 print(f"Results already exist and look complete at {output_file}. Skipping evaluation.")
                 sys.exit(0)
         except Exception as e:
@@ -1136,6 +1143,26 @@ if __name__ == "__main__":
     # Initialize model pipeline
     pipe = initialize_model(args)
     args.artifact_warnings = []
+    timing = {"enabled": bool(args.measure_time), "videos": 0,
+              "total_seconds": 0.0}
+
+    def score_video(video_args, video_path, video_pipe):
+        if not args.measure_time:
+            return evaluate_video(video_args, video_path, video_pipe)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        started = time.perf_counter()
+        loss, log_info = evaluate_video(video_args, video_path, video_pipe)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        elapsed = time.perf_counter() - started
+        timing["videos"] += 1
+        timing["total_seconds"] += elapsed
+        average = timing["total_seconds"] / timing["videos"]
+        log_info["evaluation_time_seconds"] = elapsed
+        print("Timing: video %d | %.3fs | running average %.3fs"
+              % (timing["videos"], elapsed, average))
+        return loss, log_info
     
     # Set global seed
     _ = set_seed(args.seed)
@@ -1143,9 +1170,9 @@ if __name__ == "__main__":
     # Run evaluation. The two benchmarks differ only in how clips are grouped
     # and captioned; both score every video with `evaluate_video`.
     if args.data == PHYSLOC:
-        results = evaluate_physloc(args, pipe)
+        results = evaluate_physloc(args, pipe, score_video)
     else:
-        results = evaluate_likephys(args, dataset_dir, pipe)
+        results = evaluate_likephys(args, dataset_dir, pipe, score_video)
     misrank_metrics = compute_misrank_normalized(results)
     analysis_rows = tidy_rows(results) if args.data == PHYSLOC else []
     category_metrics = category_summaries(analysis_rows) if analysis_rows else []
@@ -1168,6 +1195,12 @@ if __name__ == "__main__":
                 args.visualize and args.data == PHYSLOC
                 and not args.artifact_warnings),
             "artifact_warnings": list(args.artifact_warnings),
+            "timing": {
+                **timing,
+                "average_seconds_per_video": (
+                    timing["total_seconds"] / timing["videos"]
+                    if timing["videos"] else None),
+            },
         },
     }
     # Preserve expensive model scores before creating optional reports.

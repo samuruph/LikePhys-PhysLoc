@@ -270,6 +270,8 @@ def evaluate(args: object, pipe: object, score_video: ScoreVideo
             }
             if "latent_shape" in log_info:
                 info["latent_shape"] = log_info["latent_shape"]
+            if "evaluation_time_seconds" in log_info:
+                info["evaluation_time_seconds"] = log_info["evaluation_time_seconds"]
             subgroup_results.setdefault(variation, {})[sample.uid] = info
             runtime[sample.uid] = {
                 "sample": sample,
