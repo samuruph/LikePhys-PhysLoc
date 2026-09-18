@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import subprocess
 from typing import Dict, Optional, Sequence
 
 import cv2
@@ -115,14 +117,28 @@ def render_clip(sample, error: np.ndarray, indices: Sequence[int], scale: float,
                   if annotations is not None else {})
         frames.append(compose_frame(rgb, errors[t], scale, **kwargs))
     height, width = frames[0].shape[:2]
-    writer = cv2.VideoWriter(
-        output_mp4, cv2.VideoWriter_fourcc(*"mp4v"),
-        max(1.0, float(sample.fps)), (width, height))
-    if not writer.isOpened():
-        raise IOError("MPEG-4 (mp4v) encoder unavailable for %s" % output_mp4)
-    for frame in frames:
-        writer.write(frame[..., ::-1])
-    writer.release()
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise IOError("ffmpeg is required to write VS Code-compatible H.264 video")
+    command = [
+        ffmpeg, "-y", "-loglevel", "error",
+        "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-pix_fmt", "bgr24", "-s", "%dx%d" % (width, height),
+        "-r", str(max(1.0, float(sample.fps))), "-i", "-",
+        "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart", output_mp4,
+    ]
+    process = subprocess.Popen(command, stdin=subprocess.PIPE)
+    try:
+        for frame in frames:
+            process.stdin.write(np.ascontiguousarray(frame[..., ::-1]).tobytes())
+        process.stdin.close()
+        if process.wait() != 0:
+            raise IOError("ffmpeg could not encode H.264 video: %s" % output_mp4)
+    except Exception:
+        process.kill()
+        process.wait()
+        raise
     _clip_summary(sample, error, indices, scale, output_png, annotation_sample)
 
 

@@ -1,4 +1,6 @@
 import cv2
+import shutil
+import subprocess
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
@@ -31,17 +33,23 @@ def save_video(frames, output_path, fps=30):
         output_path: path to save video
         fps: frames per second
     """
-    writer = cv2.VideoWriter(
-        output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps,
-        (frames.shape[2], frames.shape[1])
-    )
-    if not writer.isOpened():
-        raise IOError("MPEG-4 (mp4v) encoder unavailable for %s" % output_path)
-    
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise IOError("ffmpeg is required to write VS Code-compatible H.264 video")
+    height, width = frames.shape[1:3]
+    command = [
+        ffmpeg, "-y", "-loglevel", "error",
+        "-f", "rawvideo", "-vcodec", "rawvideo", "-pix_fmt", "rgb24",
+        "-s", "%dx%d" % (width, height), "-r", str(fps), "-i", "-",
+        "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart", output_path,
+    ]
+    process = subprocess.Popen(command, stdin=subprocess.PIPE)
     for frame in frames:
-        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        writer.write(frame)
-    writer.release()
+        process.stdin.write(np.ascontiguousarray(frame).tobytes())
+    process.stdin.close()
+    if process.wait() != 0:
+        raise IOError("ffmpeg could not encode H.264 video: %s" % output_path)
 
 def visualize_flow(frame1, frame2):
     """

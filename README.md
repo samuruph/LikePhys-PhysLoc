@@ -28,6 +28,8 @@ cd LikePhys
 # Install dependencies
 pip install torch torchvision diffusers accelerate transformers
 pip install opencv-python pillow numpy matplotlib tqdm h5py
+# Required for VS Code-compatible H.264 visualization videos
+# Conda: conda install -c conda-forge ffmpeg
 
 # Download dataset from Hugging Face
 # Option 1: Using git clone (recommended)
