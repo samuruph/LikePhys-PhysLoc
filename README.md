@@ -68,6 +68,8 @@ PhysLoc only (`--data physloc`):
 - `--physloc_hub_repo`: a release to download instead, e.g. `samueleruf/physloc-mini` (into `--physloc_cache`, default `data/physloc`)
 - `--physloc_split`: only this split of a downloaded release (`main`, `held_out`, `debug`)
 - `--physloc_family`, `--physloc_scenario`, `--physloc_level`, `--physloc_condition`, `--physloc_severity_bin`: only invalid clips matching these; each pair's valid clip is always kept as the reference
+- `--scores`: repeatable or comma-separated PhysLoc metric groups: `base_ppe`, `temporal_ppe`, `spatial_ppe`, `spatiotemporal_ppe`, or `all` (default: `base_ppe`)
+- `--visualize`: write synchronized clip MP4s, clip summaries, and valid/invalid pair summaries using a shared PPE error scale
 - `--physloc_repo`: the PhysLoc checkout whose `physloc/loader.py` reads a release that ships no `loader.py`; a downloaded release is read with its own (default: `$PHYSLOC_REPO`, then `../physloc`)
 
 ### Sample Scripts
@@ -90,6 +92,10 @@ bash run_eval_likephys.sh
 
 # PhysLoc: all models on each release in PHYSLOC_ROOTS (space-separated)
 PHYSLOC_ROOTS="data/physloc/samueleruf__physloc-mini" bash run_eval_physloc.sh
+
+# All localized scores and visual evidence
+PHYSLOC_SCORES=all PHYSLOC_VISUALIZE=1 \
+  PHYSLOC_ROOTS="data/physloc/samueleruf__physloc-mini" bash run_eval_physloc.sh
 ```
 
 ## Datasets
@@ -114,6 +120,21 @@ huggingface-cli download JianhaoDYDY/LikePhys-Benchmark --repo-type dataset --lo
 ### PhysLoc
 
 A PhysLoc release groups clips into *pairs*: one valid clip and every invalid clip rendered from the same scene. Each pair is scored as one LikePhys subgroup, and an invalid clip's variation type is `<family>_<severity bin>` (e.g. `permanence_strong`), so the mis-rank is reported per violation family and severity.
+
+Localized PPE keeps the original pair decision (`PPE(invalid) > PPE(valid)`) and adds complementary localization measurements. Temporal PPE stores native latent-frame traces and their projection onto sampled RGB frames. Spatial pair scores apply the same annotation mask to both twins. Spatio-temporal AP (average precision) ranks time-space tokens by PPE error and measures whether annotated violation tokens rank highest; error ratios compare mean PPE inside an annotation with foreground outside it.
+
+The spatial vocabulary is:
+
+- `violating_object`: visible invalid-side silhouette of the violator.
+- `active_violation`: the valid/invalid footprint union on observable evidence frames.
+- `active_violation_visible`: the invalid-side visible subset.
+- `expected_object`: the lawful valid-twin trajectory during consequence frames.
+- `causal_consequence`: downstream affected objects and causal pixels.
+- `outside_violation_foreground` / `outside_violation_all`: comparison regions without / with background.
+
+This union/reference formulation also handles permanence: disappearance and reappearance are event frames, while `expected_object` follows the lawful trajectory through the missing interval. Unweighted scores are used for weak/medium/strong trend tests; severity-weighted PPE is reported only as a separate diagnostic.
+
+Each PhysLoc result directory contains `analysis/data/` CSV files and `analysis/plots/` category and severity plots. With `--visualize`, `visualizations/clips/` contains four-panel MP4s and PNG summaries, and `visualizations/pairs/` contains valid/invalid temporal comparisons.
 
 Releases are read with PhysLoc's dataloader, `physloc/loader.py` from the PhysLoc repository (a checkout at `../physloc`, or wherever `--physloc_repo` / `$PHYSLOC_REPO` points). It needs only numpy, so the generator does not have to be installed here. `utils/physloc_dataset.py` hands the evaluator the loader's own `Pair` and `Clip` objects. To see which pairs a release yields before spending GPU time:
 

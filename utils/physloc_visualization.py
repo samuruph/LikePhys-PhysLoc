@@ -120,6 +120,7 @@ def render_clip(sample, error: np.ndarray, indices: Sequence[int], scale: float,
 
 def _pyplot():
     os.environ.setdefault("MPLCONFIGDIR", "/data/tmp/matplotlib")
+    os.environ.setdefault("XDG_CACHE_HOME", "/data/tmp/cache")
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -199,15 +200,16 @@ def render_pair_summary(valid_runtime: Dict, invalid_runtime: Dict,
     plt.close(fig)
 
 
-def render_pair_artifacts(run_dir: str, pair, runtime: Dict[str, Dict]) -> None:
+def render_pair_artifacts(run_dir: str, pair, runtime: Dict[str, Dict],
+                          model: str = "model") -> None:
     available = [entry for entry in runtime.values() if entry.get("grid") is not None]
     if not available:
         return
     pool = np.concatenate([entry["grid"].ravel() for entry in available])
     positive = pool[pool > 0]
     scale = float(np.percentile(positive, 99.0)) if positive.size else 1.0
-    clips_dir = os.path.join(run_dir, "visualizations", "clips")
-    pairs_dir = os.path.join(run_dir, "visualizations", "pairs")
+    clips_dir = os.path.join(run_dir, "visualizations", "clips", _safe(model))
+    pairs_dir = os.path.join(run_dir, "visualizations", "pairs", _safe(model))
     valid = runtime.get(pair.valid.uid)
     if valid is not None and valid.get("grid") is not None:
         stem = _safe(pair.valid.uid)

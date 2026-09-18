@@ -2,7 +2,8 @@ import tempfile
 import unittest
 
 from utils.physloc_reporting import (
-    category_summaries, severity_sensitivity, tidy_rows, write_csv,
+    category_summaries, severity_sensitivity, tidy_rows,
+    write_analysis_bundle, write_csv,
 )
 
 
@@ -47,6 +48,20 @@ class ReportingTests(unittest.TestCase):
             write_csv(path, rows)
             with open(path, encoding="utf-8") as handle:
                 self.assertTrue(handle.read().startswith("pair_uid"))
+
+    def test_analysis_bundle_writes_data_and_plots(self):
+        group = {"valid": {"v": {"loss": 1.0}}}
+        for severity, loss in (("weak", 1.1), ("medium", 1.3), ("strong", 1.8)):
+            group["permanence_" + severity] = {severity: _info(severity, loss)}
+        rows = tidy_rows({"pair": group})
+        categories = category_summaries(rows)
+        severity = severity_sensitivity(rows)
+        with tempfile.TemporaryDirectory() as root:
+            write_analysis_bundle(root, "model", rows, categories, severity)
+            self.assertTrue(__import__("os").path.exists(
+                root + "/analysis/data/category_summary_model.csv"))
+            self.assertTrue(__import__("os").path.exists(
+                root + "/analysis/plots/model/severity_base_ppe.png"))
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ import numpy as np
 from utils.physloc_metrics import (
     annotation_grids, average_precision, error_ratio, expand_latent_trace,
     localization_metrics, masked_mean, parse_score_groups, project_mask,
-    project_volume, temporal_bins, temporal_metrics,
+    project_volume, temporal_bins, temporal_metrics, normalize_condition,
 )
 
 
@@ -33,6 +33,7 @@ class MetricTests(unittest.TestCase):
                          ("base_ppe", "temporal_ppe"))
         self.assertEqual(set(parse_score_groups(["all"])),
                          {"base_ppe", "temporal_ppe", "spatial_ppe", "spatiotemporal_ppe"})
+        self.assertEqual(normalize_condition("camera+multi"), "multi_motion")
 
     def test_masked_mean_and_weighted_mean(self):
         error = np.array([1.0, 3.0])

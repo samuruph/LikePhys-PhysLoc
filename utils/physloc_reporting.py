@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import math
 import os
+import re
 from collections import defaultdict
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -180,9 +181,7 @@ def severity_sensitivity(rows: Sequence[Dict[str, object]]) -> Dict[str, object]
             "spearman": _spearman([ladder[name] for name in ordered]),
         })
 
-    by_score = []
-    for score in sorted({row["score"] for row in group_rows}):
-        items = [row for row in group_rows if row["score"] == score]
+    def summarize(items, score, family=None):
         comparison = {}
         for key in ("medium>weak", "strong>medium", "strong>weak"):
             values = [row["comparisons"][key] for row in items
@@ -191,13 +190,25 @@ def severity_sensitivity(rows: Sequence[Dict[str, object]]) -> Dict[str, object]
                                "accuracy": float(np.mean(values)) if values else None}
         full = [row["full_ladder"] for row in items if row["full_ladder"] is not None]
         correlations = [row["spearman"] for row in items if row["spearman"] is not None]
-        by_score.append({
+        return {
             "score": score, "ordered_pair_accuracy": comparison,
+            "family": family,
             "full_ladder": {"count": len(full),
                             "accuracy": float(np.mean(full)) if full else None},
             "spearman": _summary(correlations),
-        })
-    return {"matched_groups": group_rows, "by_score": by_score}
+        }
+
+    by_score = [summarize(
+        [row for row in group_rows if row["score"] == score], score)
+        for score in sorted({row["score"] for row in group_rows})]
+    keys = sorted({(row["family"], row["score"]) for row in group_rows},
+                  key=str)
+    by_family_score = [summarize(
+        [row for row in group_rows
+         if row["family"] == family and row["score"] == score],
+        score, family) for family, score in keys]
+    return {"matched_groups": group_rows, "by_score": by_score,
+            "by_family_score": by_family_score}
 
 
 def write_csv(path: str, rows: Sequence[Dict[str, object]]) -> None:
@@ -209,3 +220,205 @@ def write_csv(path: str, rows: Sequence[Dict[str, object]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows({key: row.get(key) for key in fields} for row in rows)
+
+
+def _safe(value: object) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("_")
+
+
+def _write_category_csv(path, summaries):
+    fields = ("dimension", "category", "score", "kind", "count", "mean",
+              "std", "ci95", "gap_count", "gap_mean", "gap_std", "gap_ci95",
+              "detection_rate", "misrank_rate")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for item in summaries:
+            value, gap = item["value"], item["ppe_gap"]
+            writer.writerow({
+                "dimension": item["dimension"], "category": item["category"],
+                "score": item["score"], "kind": item["kind"],
+                "count": value["count"], "mean": value["mean"],
+                "std": value["std"], "ci95": value["ci95"],
+                "gap_count": gap["count"], "gap_mean": gap["mean"],
+                "gap_std": gap["std"], "gap_ci95": gap["ci95"],
+                "detection_rate": item["detection_rate"],
+                "misrank_rate": item["misrank_rate"],
+            })
+
+
+def _write_severity_csv(path, severity):
+    fields = ("pair_uid", "family", "score", "weak_gap", "medium_gap",
+              "strong_gap", "medium_gt_weak", "strong_gt_medium",
+              "strong_gt_weak", "full_ladder", "spearman")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for item in severity["matched_groups"]:
+            writer.writerow({
+                "pair_uid": item["pair_uid"], "family": item["family"],
+                "score": item["score"],
+                "weak_gap": item["gaps"].get("weak"),
+                "medium_gap": item["gaps"].get("medium"),
+                "strong_gap": item["gaps"].get("strong"),
+                "medium_gt_weak": item["comparisons"]["medium>weak"],
+                "strong_gt_medium": item["comparisons"]["strong>medium"],
+                "strong_gt_weak": item["comparisons"]["strong>weak"],
+                "full_ladder": item["full_ladder"],
+                "spearman": item["spearman"],
+            })
+
+
+def _pyplot():
+    os.environ.setdefault("MPLCONFIGDIR", "/data/tmp/matplotlib")
+    os.environ.setdefault("XDG_CACHE_HOME", "/data/tmp/cache")
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    return plt
+
+
+def _plot_category_heatmaps(summaries, plot_dir):
+    plt = _pyplot()
+    for dimension in ("severity", "complexity", "condition", "difficulty"):
+        subset = [row for row in summaries if row["dimension"] == dimension]
+        for kind in sorted({row["kind"] for row in subset}):
+            rows = [row for row in subset if row["kind"] == kind]
+            scores = sorted({row["score"] for row in rows})
+            categories = sorted({str(row["category"]) for row in rows})
+            if not scores or not categories:
+                continue
+            matrix = np.full((len(scores), len(categories)), np.nan)
+            for row in rows:
+                if row["value"]["mean"] is not None:
+                    matrix[scores.index(row["score"]),
+                           categories.index(str(row["category"]))] = row["value"]["mean"]
+            fig, ax = plt.subplots(figsize=(max(6, 1.2 * len(categories)),
+                                            max(3, .42 * len(scores) + 2)))
+            image = ax.imshow(np.ma.masked_invalid(matrix), aspect="auto", cmap="viridis")
+            ax.set_xticks(range(len(categories)), categories, rotation=35, ha="right")
+            ax.set_yticks(range(len(scores)), scores)
+            ax.set_title("%s by %s" % (kind.replace("_", " ").title(), dimension))
+            fig.colorbar(image, ax=ax, label="mean score")
+            fig.tight_layout()
+            fig.savefig(os.path.join(plot_dir, "heatmap_%s_%s.png"
+                                     % (_safe(dimension), _safe(kind))), dpi=170)
+            plt.close(fig)
+
+
+def _plot_base_category_bars(summaries, plot_dir):
+    plt = _pyplot()
+    for dimension in ("severity", "complexity", "condition", "difficulty"):
+        rows = [row for row in summaries
+                if row["dimension"] == dimension and row["score"] == "base_ppe"
+                and row["ppe_gap"]["mean"] is not None]
+        if not rows:
+            continue
+        labels = [str(row["category"]) for row in rows]
+        means = [row["ppe_gap"]["mean"] for row in rows]
+        errors = [row["ppe_gap"]["ci95"] for row in rows]
+        fig, ax = plt.subplots(figsize=(max(6, len(rows) * 1.1), 4))
+        ax.bar(labels, means, yerr=errors, color="#4c78a8", capsize=4)
+        ax.axhline(0, color="#333333", linewidth=.8)
+        ax.set(title="Base PPE gap by %s" % dimension,
+               ylabel="invalid PPE - valid PPE")
+        ax.tick_params(axis="x", rotation=30)
+        ax.grid(axis="y", alpha=.25)
+        fig.tight_layout()
+        fig.savefig(os.path.join(plot_dir, "base_ppe_gap_%s.png" % _safe(dimension)),
+                    dpi=170)
+        plt.close(fig)
+
+
+def _plot_severity(rows, severity, plot_dir):
+    plt = _pyplot()
+    pair_rows = [row for row in rows if row["kind"] == "pair_ppe"
+                 and row.get("severity") in SEVERITY_ORDER
+                 and not str(row["score"]).startswith("spatial_severity_weighted:")
+                 and row.get("ppe_gap") is not None]
+    for score in sorted({row["score"] for row in pair_rows}):
+        selected = [row for row in pair_rows if row["score"] == score]
+        labels = ["weak", "medium", "strong"]
+        summaries = [_summary([float(row["ppe_gap"]) for row in selected
+                               if row["severity"] == label]) for label in labels]
+        if not any(item["count"] for item in summaries):
+            continue
+        fig, ax = plt.subplots(figsize=(6, 4.5))
+        groups = [item for item in severity["matched_groups"] if item["score"] == score]
+        for group in groups:
+            xs, ys = [], []
+            for index, label in enumerate(labels):
+                if label in group["gaps"]:
+                    xs.append(index); ys.append(group["gaps"][label])
+            ax.plot(xs, ys, color="#999999", alpha=.18, linewidth=.8)
+        means = [item["mean"] if item["mean"] is not None else np.nan
+                 for item in summaries]
+        ci = [item["ci95"] if item["ci95"] is not None else 0 for item in summaries]
+        ax.errorbar(range(3), means, yerr=ci, color="#d84a4a", marker="o",
+                    linewidth=2.2, capsize=4, label="mean ± 95% CI")
+        ax.axhline(0, color="#333333", linewidth=.8)
+        ax.set_xticks(range(3), labels)
+        ax.set(title="Severity trend: %s" % score,
+               ylabel="invalid PPE - valid PPE")
+        ax.grid(axis="y", alpha=.25)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(os.path.join(plot_dir, "severity_%s.png" % _safe(score)), dpi=170)
+        plt.close(fig)
+
+    ordering = severity["by_score"]
+    if ordering:
+        labels = [row["score"] for row in ordering]
+        values = [row["full_ladder"]["accuracy"] for row in ordering]
+        keep = [i for i, value in enumerate(values) if value is not None]
+        if keep:
+            fig, ax = plt.subplots(figsize=(9, max(3, .45 * len(keep) + 1.5)))
+            ax.barh(range(len(keep)), [values[i] for i in keep], color="#59a14f")
+            ax.set_yticks(range(len(keep)), [labels[i] for i in keep])
+            ax.set(xlim=(0, 1), xlabel="fraction weak < medium < strong",
+                   title="Full severity-ladder accuracy")
+            ax.grid(axis="x", alpha=.25)
+            fig.tight_layout()
+            fig.savefig(os.path.join(plot_dir, "severity_ordering_accuracy.png"), dpi=170)
+            plt.close(fig)
+
+    family_rows = [row for row in severity.get("by_family_score", [])
+                   if row["full_ladder"]["accuracy"] is not None]
+    if family_rows:
+        families = sorted({row["family"] for row in family_rows})
+        scores = sorted({row["score"] for row in family_rows})
+        matrix = np.full((len(scores), len(families)), np.nan)
+        for row in family_rows:
+            matrix[scores.index(row["score"]), families.index(row["family"])] = (
+                row["full_ladder"]["accuracy"])
+        fig, ax = plt.subplots(figsize=(max(7, len(families) * .8),
+                                        max(3, len(scores) * .42 + 2)))
+        image = ax.imshow(np.ma.masked_invalid(matrix), vmin=0, vmax=1,
+                          aspect="auto", cmap="RdYlGn")
+        ax.set_xticks(range(len(families)), families, rotation=40, ha="right")
+        ax.set_yticks(range(len(scores)), scores)
+        ax.set_title("Severity ordering by violation family")
+        fig.colorbar(image, ax=ax, label="fraction weak < medium < strong")
+        fig.tight_layout()
+        fig.savefig(os.path.join(plot_dir, "severity_ordering_by_family.png"), dpi=170)
+        plt.close(fig)
+
+
+def write_analysis_bundle(run_dir: str, model: str,
+                          rows: Sequence[Dict[str, object]],
+                          categories: Sequence[Dict[str, object]],
+                          severity: Dict[str, object]) -> None:
+    data_dir = os.path.join(run_dir, "analysis", "data")
+    plot_dir = os.path.join(run_dir, "analysis", "plots", _safe(model))
+    os.makedirs(plot_dir, exist_ok=True)
+    write_csv(os.path.join(data_dir, "metrics_%s.csv" % model), rows)
+    _write_category_csv(os.path.join(data_dir, "category_summary_%s.csv" % model), categories)
+    _write_severity_csv(os.path.join(data_dir, "severity_ladders_%s.csv" % model), severity)
+    try:
+        _plot_category_heatmaps(categories, plot_dir)
+        _plot_base_category_bars(categories, plot_dir)
+        _plot_severity(rows, severity, plot_dir)
+    except ImportError:
+        print("matplotlib is unavailable; wrote analysis CSV files without plots")

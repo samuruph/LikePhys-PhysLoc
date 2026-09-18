@@ -16,6 +16,11 @@ read -r -a RELEASES <<< "${PHYSLOC_ROOTS:-data/physloc-review_L0_f37}"
 MODELS=(animatediff zeroscope modelscope wan2.1-T2V-1.3b hunyuan_t2v ltx-0.9.5 animatediff_sdxl cogvideox mochi cogvideox-5b wan2.1-T2V-14b)
 MODELS=(wan2.1-T2V-1.3b)
 FLAGS=("--guidance_scale")
+SCORES="${PHYSLOC_SCORES:-base_ppe}"
+VIZ_FLAG=()
+if [ "${PHYSLOC_VISUALIZE:-0}" = "1" ]; then
+  VIZ_FLAG=("--visualize")
+fi
 
 declare -A GPU_PIDS
 
@@ -57,7 +62,7 @@ for seed in "${SEEDS[@]}"; do
         echo "→ GPU $gpu ← model=$model, release=$release, seed=$seed, flag=$flag"
         CUDA_VISIBLE_DEVICES=$gpu \
           python evaluator.py --model="$model" --data=physloc --physloc_root="$release" \
-            --seed="$seed" $flag --tag_name="$tag" &
+            --seed="$seed" $flag --scores="$SCORES" "${VIZ_FLAG[@]}" --tag_name="$tag" &
         GPU_PIDS[$gpu]=$!
       done
     done

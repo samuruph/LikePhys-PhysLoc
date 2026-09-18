@@ -36,7 +36,8 @@ from utils.physloc_metrics import (
     temporal_metrics,
 )
 from utils.physloc_reporting import (
-    category_summaries, severity_sensitivity, tidy_rows, write_csv,
+    category_summaries, severity_sensitivity, tidy_rows,
+    write_analysis_bundle,
 )
 
 # ---------------------------------------------------------------------------
@@ -930,7 +931,7 @@ def evaluate_physloc(args, pipe):
                 _attach_physloc_pair_metrics(args, valid_runtime, invalid_runtime)
         if args.visualize:
             from utils.physloc_visualization import render_pair_artifacts
-            render_pair_artifacts(args.run_dir, pair, runtime)
+            render_pair_artifacts(args.run_dir, pair, runtime, args.model)
 
         if subgroup_results:
             results[pair.pair_uid] = subgroup_results
@@ -1323,7 +1324,10 @@ def parse_args():
     parser.add_argument("--tag_name", type=str, default=" ", help="Name of the ablation study")
     parser.add_argument("--exp_name", type=str, default="evaluation_t10_uniform", help="Name of the experiment")
     parser.add_argument("--output_dir", type=str, default="results", help="Output directory")
-    parser.add_argument("--visualize", action="store_true", help="Visualize the video and save to temp/check_video.mp4")
+    parser.add_argument(
+        "--visualize", action="store_true",
+        help=("PhysLoc: write per-clip MP4/PNG and pair PNG artifacts; "
+              "LikePhys: save the legacy denoising preview"))
     parser.add_argument(
         "--scores", action="append", default=None,
         help=("PPE score groups, repeatable or comma-separated: base_ppe, "
@@ -1462,8 +1466,8 @@ if __name__ == "__main__":
         },
     }
     if analysis_rows:
-        analysis_dir = os.path.join(os.path.dirname(output_file), "analysis", "data")
-        write_csv(os.path.join(analysis_dir, f"metrics_{args.model}.csv"), analysis_rows)
+        write_analysis_bundle(os.path.dirname(output_file), args.model,
+                              analysis_rows, category_metrics, severity_metrics)
     with open(output_file, "w") as f:
         json.dump(final_results, f, indent=2)
     print(f"\nResults saved to {output_file}")

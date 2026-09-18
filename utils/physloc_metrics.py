@@ -19,7 +19,7 @@ def normalize_condition(value: object) -> str:
         "distractor": "distractors", "distractors": "distractors",
         "multi": "multi", "multiple": "multi",
         "multi_motion": "multi_motion", "multi_camera_motion": "multi_motion",
-        "multi+motion": "multi_motion",
+        "multi+motion": "multi_motion", "camera+multi": "multi_motion",
     }
     return aliases.get(raw, "other:" + raw)
 
