@@ -25,77 +25,25 @@ from pipeline.ltx_pipeline import LTXPipeline
 from scheduler.euler_discrete import EulerDiscreteScheduler
 from scheduler.unipc_multistep import UniPCMultistepScheduler
 from accelerate import Accelerator
-from tqdm.auto import tqdm
 from diffusers.utils import export_to_video, load_image, load_video
 from diffusers.utils.torch_utils import randn_tensor
 import json
 import argparse
-from utils.physloc_metrics import (
-    annotation_grids, localization_metrics, normalize_condition,
-    normalize_difficulty, parse_score_groups, sampled_frame_indices,
-    temporal_metrics,
+from benchmarks import (
+    LIKEPHYS_DATASETS,
+    LIKEPHYS_PROMPTS,
+    PHYSLOC,
+    compute_misrank_normalized,
+    evaluate_likephys as _evaluate_likephys,
+    evaluate_physloc as _evaluate_physloc,
+    iter_physloc_groups,
+    resolve_physloc_root,
 )
+from utils.physloc_metrics import parse_score_groups, sampled_frame_indices
 from utils.physloc_reporting import (
     category_summaries, severity_sensitivity, tidy_rows,
     write_analysis_bundle,
 )
-
-# ---------------------------------------------------------------------------
-# Two benchmarks share this evaluator, and only the data loading differs.
-#
-#   LikePhys (--data ball_drop, pendulum, ...)
-#       a directory of mp4 subgroups per scenario, one fixed caption for the
-#       whole scenario; listed in LIKEPHYS_PROMPTS / LIKEPHYS_DATASETS and
-#       scored by `evaluate_likephys`.
-#
-#   PhysLoc (--data physloc)
-#       a release read through PhysLoc's own loader, one caption per clip;
-#       scored by `evaluate_physloc` via `utils/physloc_dataset.py`.
-#
-# Everything downstream of "a caption and a video path" -- the model, the
-# sampling, the loss, the mis-rank -- is shared, and identical for both.
-# ---------------------------------------------------------------------------
-
-#: The value of --data that selects the PhysLoc benchmark; any other value
-#: names a LikePhys scenario.
-PHYSLOC = "physloc"
-PHYSLOC_FILTERS = ("family", "scenario", "level", "condition", "severity_bin")
-
-#: One fixed caption per LikePhys scenario. PhysLoc has none here: every clip
-#: ships its own, which `evaluate_physloc` puts in `args.physloc_prompt`.
-LIKEPHYS_PROMPTS = {
-    "ball_drop": "ball dropping and colliding with the ground, in empty background",
-    "ball_collision": "two balls colliding with each other",
-    "pendulum": "a pendulum swinging",
-    "block_slide": "a block sliding on a slope",
-    "fluid": "a droplet falling",
-    "faucet": "fluid flowing from a faucet",
-    "cloth": "a piece of cloth dropping to the obstacle on the ground",
-    "flag": "a piece of cloth waving in the wind",
-    "river": "fluid flowing in a tank with obstacles",
-    "shadow": "light source moving around an object showing its shadow",
-    "pyramid": "a cube crash into a pile of spheres",
-    "shadowm": "camera moving around an object",
-    "sample": "two balls colliding with each other",
-}
-
-#: Where each LikePhys scenario's videos live, and the name its results are
-#: filed under. PhysLoc's equivalent is --physloc_root, resolved per run.
-LIKEPHYS_DATASETS = {
-    "ball_drop": {"dataset_dir": "./data/likephys/ball_drop_videos", "data_name": "ball_drop"},
-    "ball_collision": {"dataset_dir": "./data/likephys/ball_collision_videos", "data_name": "ball_collision"},
-    "pendulum": {"dataset_dir": "./data/likephys/pendulum_videos", "data_name": "pendulum"},
-    "block_slide": {"dataset_dir": "./data/likephys/block_slide_videos", "data_name": "block_slide"},
-    "fluid": {"dataset_dir": "./data/likephys/fluid_videos", "data_name": "fluid"},
-    "faucet": {"dataset_dir": "./data/likephys/faucet_videos", "data_name": "faucet"},
-    "cloth": {"dataset_dir": "./data/cloth_drape_videos", "data_name": "cloth"},
-    "flag": {"dataset_dir": "./data/flag_videos", "data_name": "flag"},
-    "river": {"dataset_dir": "./data/likephys/river_videos", "data_name": "river"},
-    "shadow": {"dataset_dir": "./data/likephys/shadow_videos", "data_name": "shadow"},
-    "pyramid": {"dataset_dir": "./data/likephys/pyramid_videos", "data_name": "pyramid"},
-    "shadowm": {"dataset_dir": "./data/likephys/shadow_camera_videos", "data_name": "shadowm"},
-    "sample": {"dataset_dir": "./data/likephys/sample_videos", "data_name": "sample"},
-}
 
 #: Shared by both benchmarks.
 NEGATIVE_PROMPT = "worst quality, inconsistent motion, blurry, jittery, distorted"
@@ -124,6 +72,7 @@ def load_video_and_first_frame(pipe, video_path, height, width, num_frames):
     """
     # define a convert_method that resizes every frame
     def _resize_frames(frames):
+        """Convert decoded frames to RGB at the configured model size."""
         return [frame.convert("RGB").resize((width, height)) for frame in frames]
 
     all_frames = load_video(video_path, convert_method=_resize_frames)
@@ -688,7 +637,8 @@ def evaluate_video(args, video_path, pipe, noise_aug_strength=0.02, num_videos_p
         log_info["_error_grid"] = error_grid_sum / float(total_ntrail)
         log_info["latent_shape"] = list(log_info["_error_grid"].shape)
 
-    if USE_WANDB:
+    if getattr(args, "use_wandb", False):
+        import wandb
         wandb.log(log_info)
     else:
         print(f"Video: {video_path}, Loss: {loss:.4f}, Noise pred: {log_info['noise_pred_mean']:.4f}, True noise: {log_info['true_noise_mean']:.4f}")
@@ -775,313 +725,19 @@ def evaluate_video(args, video_path, pipe, noise_aug_strength=0.02, num_videos_p
 
     return loss, log_info
 
+
 def evaluate_likephys(args, dataset_dir, pipe):
-    """
-    Evaluate LikePhys videos grouped by subgroups.
-    Store per-video losses without averaging.
-    """
-    results = {}
-    for sub_idx, subgroup_id in tqdm(enumerate(sorted(os.listdir(dataset_dir))), desc="Evaluating subgroups"):
-        subgroup_path = os.path.join(dataset_dir, subgroup_id)
-        if not os.path.isdir(subgroup_path):
-            continue
-
-        subgroup_seed = args.seed + sub_idx
-        args.subgroup_seed = subgroup_seed
-
-        subgroup_results = {}
-        for video_name in os.listdir(subgroup_path):
-            if not video_name.endswith('.mp4'):
-                continue
-            
-            video_path = os.path.join(subgroup_path, video_name)
-            variation_type = video_name.rsplit('_', 1)[0]  # e.g., over_bounce_00.mp4 → over_bounce
-            loss, log_info = evaluate_video(args, video_path, pipe)
-            if loss is not None:
-                if variation_type not in subgroup_results:
-                    subgroup_results[variation_type] = {}
-                subgroup_results[variation_type][video_name] = {
-                    "loss": loss,
-                    "noise_pred_mean": log_info["noise_pred_mean"],
-                    "true_noise_mean": log_info["true_noise_mean"],
-                    "loss_array": log_info["loss_array"]
-                }
-
-        if subgroup_results:
-            results[subgroup_id] = subgroup_results
-
-    return results
-
-
-def resolve_physloc_root(args):
-    """The PhysLoc release to evaluate, downloading it first if asked.
-
-    Returns the release root. Also clears `args.physloc_prompt`, which
-    `evaluate_physloc` then sets per pair from the clip's own caption.
-    """
-    if not args.physloc_root:
-        if not args.physloc_hub_repo:
-            raise ValueError(
-                "--data physloc needs --physloc_root (a release on disk) or "
-                "--physloc_hub_repo (one to download)")
-        from huggingface_hub import snapshot_download
-        local = os.path.join(args.physloc_cache, args.physloc_hub_repo.replace("/", "__"))
-        args.physloc_root = snapshot_download(
-            repo_id=args.physloc_hub_repo, repo_type="dataset", local_dir=local)
-        print(f"Downloaded {args.physloc_hub_repo} to {args.physloc_root}")
-
-    args.physloc_prompt = None
-    return args.physloc_root
-
-
-def _filter_choices(value):
-    if isinstance(value, (str, int, float)) or value is None:
-        return {None if value is None else str(value)}
-    return {None if item is None else str(item) for item in value}
-
-
-def _physloc_sample_matches(sample, filters):
-    for name, value in filters.items():
-        if str(getattr(sample, name)) not in _filter_choices(value):
-            return False
-    return True
-
-
-def iter_physloc_groups(root, split=None, **filters):
-    """Yield evaluator groups from the copied PhysLoc schema-v3 dataloader."""
-    from utils.physloc_dataset import PhysLocDataset
-
-    want = {k: v for k, v in filters.items() if v}
-    unknown = sorted(set(want) - set(PHYSLOC_FILTERS))
-    if unknown:
-        raise TypeError(
-            f"unknown PhysLoc filter(s) {unknown}; known: {list(PHYSLOC_FILTERS)}")
-
-    dataset = PhysLocDataset(
-        root, unit="pair", split=split, fields=("observations.rgb_path",))
-    for pair in dataset.pairs():
-        invalids = [sample for sample in pair.invalids
-                    if _physloc_sample_matches(sample, want)]
-        if not invalids:
-            continue
-        clips = [("valid", pair.valid, pair.valid.video_path)]
-        clips.extend(
-            (f"{sample.family}_{sample.severity_bin}", sample, sample.video_path)
-            for sample in invalids)
-        try:
-            yield pair, clips
-        finally:
-            for _, sample, _ in clips:
-                sample.release()
+    """Evaluate LikePhys using the shared video-scoring implementation."""
+    return _evaluate_likephys(args, dataset_dir, pipe, evaluate_video)
 
 
 def evaluate_physloc(args, pipe):
-    """
-    Evaluate a PhysLoc release. Each valid/invalid pair is a subgroup, and an
-    invalid clip's variation type is `<family>_<severity bin>`, so the mis-rank
-    is reported per family and severity.
-    """
-    filters = {name: getattr(args, "physloc_" + name) for name in PHYSLOC_FILTERS}
-    results = {}
+    """Evaluate PhysLoc using the shared video-scoring implementation."""
+    return _evaluate_physloc(args, pipe, evaluate_video)
 
-    for sub_idx, (pair, clips) in tqdm(enumerate(
-            iter_physloc_groups(args.physloc_root, split=args.physloc_split, **filters)),
-            desc="Evaluating PhysLoc pairs"):
-        # One seed and one caption per pair, so valid and invalid are scored alike.
-        args.subgroup_seed = args.seed + sub_idx
-        args.physloc_prompt = pair.prompt
-
-        subgroup_results = {}
-        runtime = {}
-        for variation_type, sample, video_path in tqdm(clips, desc=f"Evaluating {pair.pair_uid}"):
-            loss, log_info = evaluate_video(args, video_path, pipe)
-            if loss is not None:
-                info = {
-                    "loss": loss,
-                    "noise_pred_mean": log_info["noise_pred_mean"],
-                    "true_noise_mean": log_info["true_noise_mean"],
-                    "loss_array": log_info["loss_array"],
-                    "sampled_frame_indices": log_info["sampled_frame_indices"],
-                    "source_num_frames": log_info["source_num_frames"],
-                    "taxonomy": {
-                        "family": sample.family,
-                        "scenario": sample.scenario,
-                        "severity": sample.severity_bin,
-                        "complexity": sample.level,
-                        "condition": normalize_condition(sample.condition),
-                        "difficulty": normalize_difficulty(sample.difficulty),
-                    },
-                }
-                if "latent_shape" in log_info:
-                    info["latent_shape"] = log_info["latent_shape"]
-                subgroup_results.setdefault(variation_type, {})[sample.uid] = info
-                runtime[sample.uid] = {
-                    "sample": sample,
-                    "grid": log_info.get("_error_grid"),
-                    "indices": log_info["sampled_frame_indices"],
-                    "info": info,
-                }
-
-        valid_runtime = runtime.get(pair.valid.uid)
-        if valid_runtime is not None:
-            for _, invalid_sample, _ in clips[1:]:
-                invalid_runtime = runtime.get(invalid_sample.uid)
-                if invalid_runtime is None:
-                    continue
-                _attach_physloc_pair_metrics(args, valid_runtime, invalid_runtime)
-        if args.visualize:
-            from utils.physloc_visualization import render_pair_artifacts
-            render_pair_artifacts(args.run_dir, pair, runtime, args.model)
-
-        if subgroup_results:
-            results[pair.pair_uid] = subgroup_results
-
-    return results
-
-
-def _value(metric):
-    return metric.get("value") if isinstance(metric, dict) else None
-
-
-def _pair_comparison(valid_value, invalid_value):
-    if valid_value is None or invalid_value is None:
-        return {"valid_ppe": valid_value, "invalid_ppe": invalid_value,
-                "ppe_gap": None, "detected": None,
-                "reason": "pair_metric_unavailable"}
-    gap = float(invalid_value - valid_value)
-    return {"valid_ppe": float(valid_value), "invalid_ppe": float(invalid_value),
-            "ppe_gap": gap, "detected": bool(gap > 0), "reason": None}
-
-
-def _temporal_pair_comparison(valid_metrics, invalid_metrics):
-    out = {"windows": {}}
-    for name in invalid_metrics["windows"]:
-        valid_value = _value(valid_metrics["windows"].get(name, {}))
-        invalid_value = _value(invalid_metrics["windows"].get(name, {}))
-        out["windows"][name] = _pair_comparison(valid_value, invalid_value)
-
-    valid_trace = np.asarray(valid_metrics["latent_frame_ppe"], np.float64)
-    invalid_trace = np.asarray(invalid_metrics["latent_frame_ppe"], np.float64)
-    active = np.asarray(invalid_metrics["latent_clocks"]["active"], bool)
-    positive = np.flatnonzero(active | np.asarray(
-        invalid_metrics["latent_clocks"]["consequence"], bool))
-    before = np.arange(len(active)) < (int(positive[0]) if positive.size else 0)
-    if active.any() and before.any():
-        valid_elevation = float(valid_trace[active].mean() - valid_trace[before].mean())
-        invalid_elevation = float(invalid_trace[active].mean() - invalid_trace[before].mean())
-        out["pair_relative_event_contrast"] = {
-            "value": invalid_elevation - valid_elevation,
-            "invalid_elevation": invalid_elevation,
-            "valid_elevation": valid_elevation,
-            "available": True, "reason": None,
-        }
-    else:
-        out["pair_relative_event_contrast"] = {
-            "value": None, "available": False,
-            "reason": "event_or_before_window_empty",
-        }
-    return out
-
-
-def _attach_physloc_pair_metrics(args, valid_runtime, invalid_runtime):
-    """Attach all requested pair/localization metrics to one invalid record."""
-    info = invalid_runtime["info"]
-    info["pair_metrics"] = {
-        "base_ppe": _pair_comparison(valid_runtime["info"]["loss"], info["loss"])
-    }
-    valid_error = valid_runtime["grid"]
-    invalid_error = invalid_runtime["grid"]
-    if valid_error is None or invalid_error is None:
-        return
-    sample = invalid_runtime["sample"]
-    indices = invalid_runtime["indices"]
-    if valid_error.shape != invalid_error.shape:
-        raise ValueError("valid/invalid latent grids differ: %s vs %s"
-                         % (valid_error.shape, invalid_error.shape))
-    grids = annotation_grids(sample, indices, invalid_error.shape)
-    info["alignment"] = {
-        "latent_shape": list(invalid_error.shape),
-        "sampled_frame_indices": list(indices),
-        "annotation_frames": int(sample.num_frames),
-    }
-
-    if "temporal_ppe" in args.score_groups:
-        invalid_temporal = temporal_metrics(invalid_error, sample, indices)
-        valid_temporal = temporal_metrics(valid_error, sample, indices)
-        invalid_temporal["valid_latent_frame_ppe"] = valid_temporal["latent_frame_ppe"]
-        invalid_temporal["valid_rgb_frame_ppe"] = valid_temporal["rgb_frame_ppe"]
-        invalid_temporal["pair"] = _temporal_pair_comparison(
-            valid_temporal, invalid_temporal)
-        info["temporal_ppe"] = invalid_temporal
-
-    if ({"spatial_ppe", "spatiotemporal_ppe"} & set(args.score_groups)):
-        invalid_local = localization_metrics(invalid_error, grids)
-        valid_local = localization_metrics(valid_error, grids)
-        if "spatial_ppe" in args.score_groups:
-            spatial = invalid_local["spatial"]
-            for name, metrics in spatial.items():
-                valid_metrics = valid_local["spatial"][name]
-                metrics["pair"] = _pair_comparison(
-                    _value(valid_metrics["ppe"]), _value(metrics["ppe"]))
-                if "severity_weighted_ppe" in metrics:
-                    metrics["severity_weighted_pair"] = _pair_comparison(
-                        _value(valid_metrics["severity_weighted_ppe"]),
-                        _value(metrics["severity_weighted_ppe"]))
-            info["spatial_ppe"] = spatial
-        if "spatiotemporal_ppe" in args.score_groups:
-            info["spatiotemporal_ppe"] = invalid_local["spatiotemporal"]
-
-
-def compute_misrank_normalized(results):
-    """
-    Compute mis-rank within each subgroup (valid vs invalid losses).
-    Automatically discovers all variation_types ≠ "valid" as invalid types.
-    """
-    # 1) discover all invalid variation types across all subgroups
-    invalid_types = sorted({
-        var_type
-        for subgroup_data in results.values()
-        for var_type in subgroup_data.keys()
-        if var_type != "valid"
-    })
-    print(f"Discovered invalid types: {invalid_types}")
-
-    # 2) compute mis-rank for each invalid type
-    misrank_results = {}
-    for var_type in invalid_types:
-        subgroup_misranks = []
-        total_pairs = 0
-
-        for subgroup_id, subgroup_data in results.items():
-            # need at least one "valid" and one of this invalid type
-            if "valid" not in subgroup_data or var_type not in subgroup_data:
-                continue
-
-            valid_losses = [info["loss"] for info in subgroup_data["valid"].values()]
-            invalid_losses = [info["loss"] for info in subgroup_data[var_type].values()]
-
-            # form all valid–invalid pairs
-            pairs = [(v, i) for v in valid_losses for i in invalid_losses]
-            if not pairs:
-                continue
-
-            misrank = sum(1 for v, i in pairs if v > i)
-            misrank_ratio = misrank / len(pairs)
-
-            subgroup_misranks.append(misrank_ratio)
-            total_pairs += len(pairs)
-
-        avg_misrank = float(np.mean(subgroup_misranks)) if subgroup_misranks else 0.0
-
-        misrank_results[var_type] = {
-            "misrank_ratio": avg_misrank,
-            "total_pairs": total_pairs,
-            "subgroup_misranks": subgroup_misranks,
-        }
-
-    return misrank_results
 
 def set_seed(seed):
+    """Seed Python, NumPy, PyTorch, CUDA, and a returned Torch generator."""
     # Python built-in random
     random.seed(seed)
     # NumPy random
@@ -1304,15 +960,23 @@ def initialize_model(args):
     return pipe
 
 
-        
-        
+def save_results(path, payload):
+    """Atomically persist evaluation JSON to avoid partial result files."""
+    temporary_path = path + ".tmp"
+    with open(temporary_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    os.replace(temporary_path, path)
+
+
 def parse_args():
+    """Parse model, benchmark, localization, and reporting CLI options."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="svd")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--data", type=str, default="ball_drop", help="Benchmark to evaluate: 'physloc' for a PhysLoc release (see --physloc_root), or a LikePhys scenario such as ball_drop or pendulum")
-    parser.add_argument("--guidance_scale", action="store_true", help="Enable Weights & Biases logging")
+    parser.add_argument("--guidance_scale", action="store_true",
+                        help="Enable model classifier-free guidance")
     parser.add_argument("--num_frames", type=int, default=-1, help="Number of frames to evaluate")
     parser.add_argument("--height", type=int, default=-1, help="Height of the video")
     parser.add_argument("--width", type=int, default=-1, help="Width of the video")
@@ -1340,6 +1004,10 @@ def parse_args():
     parser.add_argument("--physloc_root", type=str, default=None, help="PhysLoc schema-v3 release on disk")
     parser.add_argument("--physloc_hub_repo", type=str, default=None, help="Hub dataset to download when --physloc_root is not given, e.g. samueleruf/physloc-mini")
     parser.add_argument("--physloc_cache", type=str, default="data/physloc", help="where --physloc_hub_repo is downloaded to")
+    parser.add_argument(
+        "--physloc_loader", type=str, default=None,
+        help=("canonical PhysLoc schema-v3 loader.py; defaults to "
+              "../physloc/physloc/loader.py or $PHYSLOC_LOADER"))
     parser.add_argument("--physloc_split", type=str, default=None, help="only this split of a PhysLoc release (main, held_out, debug)")
     parser.add_argument("--physloc_family", type=str, default=None, help="only this violation family")
     parser.add_argument("--physloc_scenario", type=str, default=None, help="only this scenario")
@@ -1406,8 +1074,12 @@ if __name__ == "__main__":
             requested = set(args.score_groups)
             completed = set(saved.get("configuration", {}).get(
                 "score_groups", ["base_ppe"]))
+            saved_root = saved.get("configuration", {}).get("dataset_root")
+            root_matches = (args.data != PHYSLOC or (
+                saved_root is not None
+                and os.path.realpath(saved_root) == os.path.realpath(dataset_dir)))
             if ("scene_evaluations" in saved and "misrank_metrics" in saved
-                    and requested <= completed
+                    and requested <= completed and root_matches
                     and (not args.visualize or saved.get("configuration", {}).get(
                         "visualizations_written", False))):
                 print(f"Results already exist and look complete at {output_file}. Skipping evaluation.")
@@ -1438,6 +1110,7 @@ if __name__ == "__main__":
 
     # Initialize model pipeline
     pipe = initialize_model(args)
+    args.artifact_warnings = []
     
     # Set global seed
     _ = set_seed(args.seed)
@@ -1452,7 +1125,7 @@ if __name__ == "__main__":
     analysis_rows = tidy_rows(results) if args.data == PHYSLOC else []
     category_metrics = category_summaries(analysis_rows) if analysis_rows else []
     severity_metrics = severity_sensitivity(analysis_rows) if analysis_rows else {
-        "matched_groups": [], "by_score": []}
+        "matched_groups": [], "by_score": [], "by_family_score": []}
     
     # Combine and save
     final_results = {
@@ -1462,14 +1135,25 @@ if __name__ == "__main__":
         "severity_sensitivity": severity_metrics,
         "configuration": {
             "score_groups": list(args.score_groups),
-            "visualizations_written": bool(args.visualize and args.data == PHYSLOC),
+            "dataset_root": (os.path.abspath(dataset_dir)
+                             if args.data == PHYSLOC else dataset_dir),
+            "physloc_loader": (args.physloc_loader
+                               if args.data == PHYSLOC else None),
+            "visualizations_written": bool(
+                args.visualize and args.data == PHYSLOC
+                and not args.artifact_warnings),
+            "artifact_warnings": list(args.artifact_warnings),
         },
     }
+    # Preserve expensive model scores before creating optional reports.
+    save_results(output_file, final_results)
     if analysis_rows:
-        write_analysis_bundle(os.path.dirname(output_file), args.model,
-                              analysis_rows, category_metrics, severity_metrics)
-    with open(output_file, "w") as f:
-        json.dump(final_results, f, indent=2)
+        warnings = write_analysis_bundle(
+            os.path.dirname(output_file), args.model, analysis_rows,
+            category_metrics, severity_metrics)
+        if warnings:
+            final_results["configuration"]["artifact_warnings"].extend(warnings)
+            save_results(output_file, final_results)
     print(f"\nResults saved to {output_file}")
 
     # Finalize wandb

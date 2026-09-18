@@ -4,17 +4,14 @@
 #   bash run_eval_physloc.sh                                   # the releases listed below
 #   PHYSLOC_ROOTS="data/physloc/a data/physloc/b" bash run_eval_physloc.sh
 #
-# A release is a downloaded/exported one or a generator run -- both are clips/
-# folders. A download is read with the loader.py it ships; a generator run with
-# physloc/loader.py from the PhysLoc checkout: set PHYSLOC_REPO if that is not
-# ../physloc.
+# Each path must be a schema-v3 samples/ release root. The evaluator uses the
+# canonical loader from ../physloc/physloc/loader.py (override PHYSLOC_LOADER).
 GPUS=(0) # 1 2 3 4 5 6 7)
 
 SEEDS=(42)
 # PhysLoc releases; results for each are tagged with its folder name
-read -r -a RELEASES <<< "${PHYSLOC_ROOTS:-data/physloc-review_L0_f37}"
+read -r -a RELEASES <<< "${PHYSLOC_ROOTS:-../physloc/out/review_L0_f37}"
 MODELS=(animatediff zeroscope modelscope wan2.1-T2V-1.3b hunyuan_t2v ltx-0.9.5 animatediff_sdxl cogvideox mochi cogvideox-5b wan2.1-T2V-14b)
-MODELS=(wan2.1-T2V-1.3b)
 FLAGS=("--guidance_scale")
 SCORES="${PHYSLOC_SCORES:-base_ppe}"
 VIZ_FLAG=()

@@ -27,7 +27,7 @@ cd LikePhys
 
 # Install dependencies
 pip install torch torchvision diffusers accelerate transformers
-pip install opencv-python pillow numpy matplotlib tqdm
+pip install opencv-python pillow numpy matplotlib tqdm h5py
 
 # Download dataset from Hugging Face
 # Option 1: Using git clone (recommended)
@@ -64,13 +64,13 @@ bash run_eval_physloc.sh    # every model on PhysLoc releases (see the script)
 
 PhysLoc only (`--data physloc`):
 
-- `--physloc_root`: a release on disk, downloaded/exported or a generator run -- both are `clips/` folders
+- `--physloc_root`: a schema-v3 PhysLoc release root on disk (containing `samples/`)
 - `--physloc_hub_repo`: a release to download instead, e.g. `samueleruf/physloc-mini` (into `--physloc_cache`, default `data/physloc`)
 - `--physloc_split`: only this split of a downloaded release (`main`, `held_out`, `debug`)
 - `--physloc_family`, `--physloc_scenario`, `--physloc_level`, `--physloc_condition`, `--physloc_severity_bin`: only invalid clips matching these; each pair's valid clip is always kept as the reference
+- `--physloc_loader`: canonical loader from the PhysLoc checkout; defaults to `../physloc/physloc/loader.py` or `$PHYSLOC_LOADER`
 - `--scores`: repeatable or comma-separated PhysLoc metric groups: `base_ppe`, `temporal_ppe`, `spatial_ppe`, `spatiotemporal_ppe`, or `all` (default: `base_ppe`)
 - `--visualize`: write synchronized clip MP4s, clip summaries, and valid/invalid pair summaries using a shared PPE error scale
-- `--physloc_repo`: the PhysLoc checkout whose `physloc/loader.py` reads a release that ships no `loader.py`; a downloaded release is read with its own (default: `$PHYSLOC_REPO`, then `../physloc`)
 
 ### Sample Scripts
 
@@ -91,11 +91,11 @@ python evaluator.py \
 bash run_eval_likephys.sh
 
 # PhysLoc: all models on each release in PHYSLOC_ROOTS (space-separated)
-PHYSLOC_ROOTS="data/physloc/samueleruf__physloc-mini" bash run_eval_physloc.sh
+PHYSLOC_ROOTS="../physloc/out/review_L0_f37" bash run_eval_physloc.sh
 
 # All localized scores and visual evidence
 PHYSLOC_SCORES=all PHYSLOC_VISUALIZE=1 \
-  PHYSLOC_ROOTS="data/physloc/samueleruf__physloc-mini" bash run_eval_physloc.sh
+  PHYSLOC_ROOTS="../physloc/out/review_L0_f37" bash run_eval_physloc.sh
 ```
 
 ## Datasets
@@ -126,6 +126,7 @@ Localized PPE keeps the original pair decision (`PPE(invalid) > PPE(valid)`) and
 The spatial vocabulary is:
 
 - `violating_object`: visible invalid-side silhouette of the violator.
+- `active_violating_object`: the visible violator silhouette restricted to its event clock.
 - `active_violation`: the valid/invalid footprint union on observable evidence frames.
 - `active_violation_visible`: the invalid-side visible subset.
 - `expected_object`: the lawful valid-twin trajectory during consequence frames.
@@ -136,13 +137,15 @@ This union/reference formulation also handles permanence: disappearance and reap
 
 Each PhysLoc result directory contains `analysis/data/` CSV files and `analysis/plots/` category and severity plots. With `--visualize`, `visualizations/clips/` contains four-panel MP4s and PNG summaries, and `visualizations/pairs/` contains valid/invalid temporal comparisons.
 
-Releases are read with PhysLoc's dataloader, `physloc/loader.py` from the PhysLoc repository (a checkout at `../physloc`, or wherever `--physloc_repo` / `$PHYSLOC_REPO` points). It needs only numpy, so the generator does not have to be installed here. `utils/physloc_dataset.py` hands the evaluator the loader's own `Pair` and `Clip` objects. To see which pairs a release yields before spending GPU time:
+PhysLoc releases are read with the canonical `physloc/loader.py` from the PhysLoc repository rather than a duplicated loader. The default sibling checkout is `/home/ec2-user/code/physloc`; use `--physloc_loader` or `$PHYSLOC_LOADER` elsewhere. To validate the schema-v3 layout, `h5py` dependency, and pairs before spending GPU time:
 
 ```bash
-python -m utils.physloc_dataset --physloc_root data/physloc/samueleruf__physloc-mini
+python -m utils.physloc_dataset --physloc_root ../physloc/out/review_L0_f37
 ```
 
-Releases exported before PhysLoc schema v2 (videos stored as `rgb.mp4`) cannot be read and are reported as such; re-export them with a current `physloc export`.
+The evaluation code is organized by responsibility: `benchmarks/likephys.py` and `benchmarks/physloc.py` adapt each dataset to the shared scorer, `benchmarks/common.py` contains cross-benchmark aggregation, and `utils/physloc_*` contains the canonical-loader bridge, localization metrics, reports, and visualization. `evaluator.py` owns only model setup, denoising PPE, CLI configuration, and run persistence.
+
+This evaluator intentionally requires schema v3. Passing a schema-v2 `clips/`/NPZ release produces an explicit error before model initialization.
 
 ## Supported Models
 
