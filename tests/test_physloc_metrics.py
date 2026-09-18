@@ -3,8 +3,9 @@ import unittest
 import numpy as np
 
 from utils.physloc_metrics import (
-    average_precision, error_ratio, expand_latent_trace, masked_mean,
-    parse_score_groups, project_mask, project_volume, temporal_bins,
+    annotation_grids, average_precision, error_ratio, expand_latent_trace,
+    localization_metrics, masked_mean, parse_score_groups, project_mask,
+    project_volume, temporal_bins, temporal_metrics,
 )
 
 
@@ -49,6 +50,48 @@ class MetricTests(unittest.TestCase):
         score, reason = average_precision(np.ones(3), np.zeros(3, bool))
         self.assertIsNone(score)
         self.assertEqual(reason, "no_positive_tokens")
+
+    def test_counterfactual_reference_is_gated_by_consequence(self):
+        class Fake:
+            pass
+        sample = Fake()
+        sample.timeline = {name: np.array([0, 1, 1, 0], bool) for name in
+                           ("active", "observable", "consequence")}
+        sample.timeline["occluded"] = np.array([0, 1, 1, 0], bool)
+        sample.segmentations = np.zeros((4, 2, 2), np.uint16)
+        sample.twin = Fake()
+        sample.twin.segmentations = np.zeros_like(sample.segmentations)
+        sample.twin.segmentations[:, 0, 0] = 2
+        sample.violator_mask = np.zeros_like(sample.segmentations, bool)
+        sample.violation_mask = np.zeros_like(sample.segmentations, bool)
+        sample.violation_mask[1, 0, 0] = True
+        sample.visible_violation = np.zeros_like(sample.segmentations, bool)
+        sample.reference_mask = sample.twin.segmentations == 2
+        sample.causal = np.zeros_like(sample.segmentations, np.uint8)
+        sample.severity_map = sample.violation_mask.astype(np.float32)
+        grids = annotation_grids(sample, range(4), (4, 2, 2))
+        self.assertTrue(grids["expected_object"][1, 0, 0])
+        self.assertTrue(grids["expected_object"][2, 0, 0])
+        self.assertFalse(grids["expected_object"][0, 0, 0])
+
+        error = np.zeros((4, 2, 2), float)
+        error[1, 0, 0] = 2.0
+        result = localization_metrics(error, grids)
+        self.assertEqual(result["spatial"]["active_violation"]["ppe"]["value"], 2.0)
+
+    def test_temporal_metrics_keep_native_and_projected_traces(self):
+        class Fake:
+            timeline = {
+                "active": np.array([0, 1, 1, 0], bool),
+                "observable": np.array([0, 1, 1, 0], bool),
+                "occluded": np.zeros(4, bool),
+                "consequence": np.array([0, 1, 1, 0], bool),
+            }
+        error = np.arange(16, dtype=float).reshape(4, 2, 2)
+        result = temporal_metrics(error, Fake(), range(4))
+        self.assertEqual(len(result["latent_frame_ppe"]), 4)
+        self.assertEqual(len(result["rgb_frame_ppe"]), 4)
+        self.assertTrue(result["windows"]["active_visible"]["available"])
 
 
 if __name__ == "__main__":

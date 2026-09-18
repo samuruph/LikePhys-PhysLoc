@@ -30,6 +30,11 @@ from diffusers.utils import export_to_video, load_image, load_video
 from diffusers.utils.torch_utils import randn_tensor
 import json
 import argparse
+from utils.physloc_metrics import (
+    annotation_grids, localization_metrics, normalize_condition,
+    normalize_difficulty, parse_score_groups, sampled_frame_indices,
+    temporal_metrics,
+)
 
 # ---------------------------------------------------------------------------
 # Two benchmarks share this evaluator, and only the data loading differs.
@@ -122,8 +127,7 @@ def load_video_and_first_frame(pipe, video_path, height, width, num_frames):
     first_frame = all_frames[0]
 
     total = len(all_frames)
-    idxs = np.linspace(0, total - 1, num_frames)
-    idxs = np.round(idxs).astype(int).tolist()
+    idxs = sampled_frame_indices(total, num_frames).tolist()
     sampled = [all_frames[i] for i in idxs]
 
     # preprocess into a batch tensor
@@ -131,7 +135,33 @@ def load_video_and_first_frame(pipe, video_path, height, width, num_frames):
     video_tensor = video_tensor.unsqueeze(0)  # [1, C, F, H, W]
 
 
-    return video_tensor, first_frame
+    return video_tensor, first_frame, idxs, total
+
+
+def residual_error_grid(args, pipe, residual):
+    """Convert a model-native squared residual to ``[time,height,width]``."""
+    value = residual.detach().float()
+    if value.ndim == 3:
+        # LTX packs [time, height, width] tokens along dimension 1.
+        latent_frames = (args.num_frames - 1) // pipe.vae_temporal_compression_ratio + 1
+        latent_height = args.height // pipe.vae_spatial_compression_ratio
+        latent_width = args.width // pipe.vae_spatial_compression_ratio
+        patch_t = int(pipe.transformer_temporal_patch_size)
+        patch = int(pipe.transformer_spatial_patch_size)
+        grid_shape = (latent_frames // patch_t,
+                      latent_height // patch, latent_width // patch)
+        token_error = value.mean(dim=(0, 2))
+        if token_error.numel() != int(np.prod(grid_shape)):
+            raise ValueError(
+                f"cannot unpack {token_error.numel()} LTX residual tokens as {grid_shape}")
+        return token_error.reshape(grid_shape).cpu().numpy()
+    if value.ndim != 5:
+        raise ValueError(f"unsupported residual shape {tuple(value.shape)}")
+    if args.model in {"svd", "cogvideox", "cogvideox-5b", "cogvideox1.5-5b"}:
+        # [B,F,C,H,W]
+        return value.mean(dim=(0, 2)).cpu().numpy()
+    # [B,C,F,H,W]
+    return value.mean(dim=(0, 1)).cpu().numpy()
 
 
 @torch.no_grad()
@@ -147,7 +177,9 @@ def evaluate_video(args, video_path, pipe, noise_aug_strength=0.02, num_videos_p
     device = pipe._execution_device
     generator = set_seed(args.subgroup_seed)    
     # 1. Load video and first frame (with uniform resize)
-    video_tensor, first_frame = load_video_and_first_frame(pipe, video_path, height=args.height, width=args.width, num_frames=args.num_frames)
+    video_tensor, first_frame, sampled_indices, source_num_frames = load_video_and_first_frame(
+        pipe, video_path, height=args.height, width=args.width,
+        num_frames=args.num_frames)
     if video_tensor is None:
         print(f"Failed to load video: {video_path}")
         return None, None
@@ -390,6 +422,9 @@ def evaluate_video(args, video_path, pipe, noise_aug_strength=0.02, num_videos_p
         )
 
     loss_array = np.array([])
+    keep_error_grid = args.data == PHYSLOC and (
+        args.visualize or any(group != "base_ppe" for group in args.score_groups))
+    error_grid_sum = None
     total_ntrail = args.timestep_num
     # if args.timestep_strategy == "uniform":
     t_sample_step = pipe.scheduler.timesteps.shape[0] / total_ntrail
@@ -629,6 +664,10 @@ def evaluate_video(args, video_path, pipe, noise_aug_strength=0.02, num_videos_p
         # 9. Calculate weighted MSE loss (loss) as a metric for video physical plausibility
         loss = F.mse_loss(noise, noise_pred, reduction='mean').item()
         loss_array = np.append(loss_array, loss)
+        if keep_error_grid:
+            squared_error = (noise.float() - noise_pred.float()).square()
+            grid = residual_error_grid(args, pipe, squared_error)
+            error_grid_sum = grid if error_grid_sum is None else error_grid_sum + grid
     
     loss = np.mean(loss_array)
     
@@ -637,15 +676,20 @@ def evaluate_video(args, video_path, pipe, noise_aug_strength=0.02, num_videos_p
         "loss": loss,
         "noise_pred_mean": noise_pred.mean().item(),
         "true_noise_mean": noise.mean().item(),
-        "loss_array": list(loss_array)
+        "loss_array": list(loss_array),
+        "sampled_frame_indices": sampled_indices,
+        "source_num_frames": source_num_frames,
     }
+    if error_grid_sum is not None:
+        log_info["_error_grid"] = error_grid_sum / float(total_ntrail)
+        log_info["latent_shape"] = list(log_info["_error_grid"].shape)
 
     if USE_WANDB:
         wandb.log(log_info)
     else:
         print(f"Video: {video_path}, Loss: {loss:.4f}, Noise pred: {log_info['noise_pred_mean']:.4f}, True noise: {log_info['true_noise_mean']:.4f}")
 
-    visualize = args.visualize
+    visualize = args.visualize and args.data != PHYSLOC
     if visualize:
         with torch.no_grad():
             if args.model == "svd":
@@ -844,20 +888,141 @@ def evaluate_physloc(args, pipe):
         args.physloc_prompt = pair.prompt
 
         subgroup_results = {}
+        runtime = {}
         for variation_type, sample, video_path in tqdm(clips, desc=f"Evaluating {pair.pair_uid}"):
             loss, log_info = evaluate_video(args, video_path, pipe)
             if loss is not None:
-                subgroup_results.setdefault(variation_type, {})[sample.uid] = {
+                info = {
                     "loss": loss,
                     "noise_pred_mean": log_info["noise_pred_mean"],
                     "true_noise_mean": log_info["true_noise_mean"],
-                    "loss_array": log_info["loss_array"]
+                    "loss_array": log_info["loss_array"],
+                    "sampled_frame_indices": log_info["sampled_frame_indices"],
+                    "source_num_frames": log_info["source_num_frames"],
+                    "taxonomy": {
+                        "family": sample.family,
+                        "scenario": sample.scenario,
+                        "severity": sample.severity_bin,
+                        "complexity": sample.level,
+                        "condition": normalize_condition(sample.condition),
+                        "difficulty": normalize_difficulty(sample.difficulty),
+                    },
                 }
+                if "latent_shape" in log_info:
+                    info["latent_shape"] = log_info["latent_shape"]
+                subgroup_results.setdefault(variation_type, {})[sample.uid] = info
+                runtime[sample.uid] = {
+                    "sample": sample,
+                    "grid": log_info.get("_error_grid"),
+                    "indices": log_info["sampled_frame_indices"],
+                    "info": info,
+                }
+
+        valid_runtime = runtime.get(pair.valid.uid)
+        if valid_runtime is not None:
+            for _, invalid_sample, _ in clips[1:]:
+                invalid_runtime = runtime.get(invalid_sample.uid)
+                if invalid_runtime is None:
+                    continue
+                _attach_physloc_pair_metrics(args, valid_runtime, invalid_runtime)
 
         if subgroup_results:
             results[pair.pair_uid] = subgroup_results
 
     return results
+
+
+def _value(metric):
+    return metric.get("value") if isinstance(metric, dict) else None
+
+
+def _pair_comparison(valid_value, invalid_value):
+    if valid_value is None or invalid_value is None:
+        return {"valid_ppe": valid_value, "invalid_ppe": invalid_value,
+                "ppe_gap": None, "detected": None,
+                "reason": "pair_metric_unavailable"}
+    gap = float(invalid_value - valid_value)
+    return {"valid_ppe": float(valid_value), "invalid_ppe": float(invalid_value),
+            "ppe_gap": gap, "detected": bool(gap > 0), "reason": None}
+
+
+def _temporal_pair_comparison(valid_metrics, invalid_metrics):
+    out = {"windows": {}}
+    for name in invalid_metrics["windows"]:
+        valid_value = _value(valid_metrics["windows"].get(name, {}))
+        invalid_value = _value(invalid_metrics["windows"].get(name, {}))
+        out["windows"][name] = _pair_comparison(valid_value, invalid_value)
+
+    valid_trace = np.asarray(valid_metrics["latent_frame_ppe"], np.float64)
+    invalid_trace = np.asarray(invalid_metrics["latent_frame_ppe"], np.float64)
+    active = np.asarray(invalid_metrics["latent_clocks"]["active"], bool)
+    positive = np.flatnonzero(active | np.asarray(
+        invalid_metrics["latent_clocks"]["consequence"], bool))
+    before = np.arange(len(active)) < (int(positive[0]) if positive.size else 0)
+    if active.any() and before.any():
+        valid_elevation = float(valid_trace[active].mean() - valid_trace[before].mean())
+        invalid_elevation = float(invalid_trace[active].mean() - invalid_trace[before].mean())
+        out["pair_relative_event_contrast"] = {
+            "value": invalid_elevation - valid_elevation,
+            "invalid_elevation": invalid_elevation,
+            "valid_elevation": valid_elevation,
+            "available": True, "reason": None,
+        }
+    else:
+        out["pair_relative_event_contrast"] = {
+            "value": None, "available": False,
+            "reason": "event_or_before_window_empty",
+        }
+    return out
+
+
+def _attach_physloc_pair_metrics(args, valid_runtime, invalid_runtime):
+    """Attach all requested pair/localization metrics to one invalid record."""
+    info = invalid_runtime["info"]
+    info["pair_metrics"] = {
+        "base_ppe": _pair_comparison(valid_runtime["info"]["loss"], info["loss"])
+    }
+    valid_error = valid_runtime["grid"]
+    invalid_error = invalid_runtime["grid"]
+    if valid_error is None or invalid_error is None:
+        return
+    sample = invalid_runtime["sample"]
+    indices = invalid_runtime["indices"]
+    if valid_error.shape != invalid_error.shape:
+        raise ValueError("valid/invalid latent grids differ: %s vs %s"
+                         % (valid_error.shape, invalid_error.shape))
+    grids = annotation_grids(sample, indices, invalid_error.shape)
+    info["alignment"] = {
+        "latent_shape": list(invalid_error.shape),
+        "sampled_frame_indices": list(indices),
+        "annotation_frames": int(sample.num_frames),
+    }
+
+    if "temporal_ppe" in args.score_groups:
+        invalid_temporal = temporal_metrics(invalid_error, sample, indices)
+        valid_temporal = temporal_metrics(valid_error, sample, indices)
+        invalid_temporal["valid_latent_frame_ppe"] = valid_temporal["latent_frame_ppe"]
+        invalid_temporal["valid_rgb_frame_ppe"] = valid_temporal["rgb_frame_ppe"]
+        invalid_temporal["pair"] = _temporal_pair_comparison(
+            valid_temporal, invalid_temporal)
+        info["temporal_ppe"] = invalid_temporal
+
+    if ({"spatial_ppe", "spatiotemporal_ppe"} & set(args.score_groups)):
+        invalid_local = localization_metrics(invalid_error, grids)
+        valid_local = localization_metrics(valid_error, grids)
+        if "spatial_ppe" in args.score_groups:
+            spatial = invalid_local["spatial"]
+            for name, metrics in spatial.items():
+                valid_metrics = valid_local["spatial"][name]
+                metrics["pair"] = _pair_comparison(
+                    _value(valid_metrics["ppe"]), _value(metrics["ppe"]))
+                if "severity_weighted_ppe" in metrics:
+                    metrics["severity_weighted_pair"] = _pair_comparison(
+                        _value(valid_metrics["severity_weighted_ppe"]),
+                        _value(metrics["severity_weighted_ppe"]))
+            info["spatial_ppe"] = spatial
+        if "spatiotemporal_ppe" in args.score_groups:
+            info["spatiotemporal_ppe"] = invalid_local["spatiotemporal"]
 
 
 def compute_misrank_normalized(results):
@@ -1153,6 +1318,11 @@ def parse_args():
     parser.add_argument("--exp_name", type=str, default="evaluation_t10_uniform", help="Name of the experiment")
     parser.add_argument("--output_dir", type=str, default="results", help="Output directory")
     parser.add_argument("--visualize", action="store_true", help="Visualize the video and save to temp/check_video.mp4")
+    parser.add_argument(
+        "--scores", action="append", default=None,
+        help=("PPE score groups, repeatable or comma-separated: base_ppe, "
+              "temporal_ppe, spatial_ppe, spatiotemporal_ppe, all "
+              "(default: base_ppe)"))
 
     parser.add_argument("--prompt_exp", type=str, default="no", help="for prompt exp")
 
@@ -1175,6 +1345,9 @@ if __name__ == "__main__":
     import json
 
     args = parse_args()
+    args.score_groups = parse_score_groups(args.scores)
+    if args.data != PHYSLOC and args.score_groups != ("base_ppe",):
+        raise ValueError("localized score groups are available only with --data physloc")
     
     # Get model-specific parameters
     model_params = get_model_params(args.model)
@@ -1219,7 +1392,13 @@ if __name__ == "__main__":
         try:
             with open(output_file, 'r') as f:
                 saved = json.load(f)
-            if "scene_evaluations" in saved and "misrank_metrics" in saved:
+            requested = set(args.score_groups)
+            completed = set(saved.get("configuration", {}).get(
+                "score_groups", ["base_ppe"]))
+            if ("scene_evaluations" in saved and "misrank_metrics" in saved
+                    and requested <= completed
+                    and (not args.visualize or saved.get("configuration", {}).get(
+                        "visualizations_written", False))):
                 print(f"Results already exist and look complete at {output_file}. Skipping evaluation.")
                 sys.exit(0)
         except Exception as e:
@@ -1263,7 +1442,11 @@ if __name__ == "__main__":
     # Combine and save
     final_results = {
         "scene_evaluations": results,
-        "misrank_metrics": misrank_metrics
+        "misrank_metrics": misrank_metrics,
+        "configuration": {
+            "score_groups": list(args.score_groups),
+            "visualizations_written": bool(args.visualize and args.data == PHYSLOC),
+        },
     }
     with open(output_file, "w") as f:
         json.dump(final_results, f, indent=2)
