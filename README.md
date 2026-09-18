@@ -137,7 +137,7 @@ The spatial vocabulary is:
 
 This union/reference formulation also handles permanence: disappearance and reappearance are event frames, while `expected_object` follows the lawful trajectory through the missing interval. Unweighted scores are used for weak/medium/strong trend tests; severity-weighted PPE is reported only as a separate diagnostic.
 
-Each PhysLoc result directory contains `analysis/data/` CSV files and `analysis/plots/` category and severity plots. With `--visualize`, `visualizations/clips/` contains four-panel MP4s and PNG summaries, and `visualizations/pairs/` contains valid/invalid temporal comparisons.
+Each PhysLoc result directory contains `analysis/data/` CSV files and `analysis/plots/` category and severity plots. With `--visualize`, `visualizations/<model>/` contains one combined MP4 and PNG summary per invalid clip. Each MP4 synchronizes the valid and invalid RGB clips, annotations, both absolute denoising-error maps, and the signed invalid-minus-valid error heatmap; its frames also show the valid/invalid PPE values. Each PNG contains the paired valid and invalid temporal traces plus their difference.
 
 PhysLoc releases are read with the canonical `physloc/loader.py` from the PhysLoc repository rather than a duplicated loader. The default sibling checkout is `/home/ec2-user/code/physloc`; use `--physloc_loader` or `$PHYSLOC_LOADER` elsewhere. To validate the schema-v3 layout, `h5py` dependency, and pairs before spending GPU time:
 

@@ -57,6 +57,46 @@ def annotation_overlay(rgb: np.ndarray, active: Optional[np.ndarray] = None,
     return image
 
 
+def _heatmap(error: np.ndarray, width: int, height: int, scale: float,
+             signed: bool = False) -> np.ndarray:
+    """Render an absolute or signed error map at display resolution."""
+    magnitude = cv2.resize(np.asarray(error, np.float32), (width, height),
+                           interpolation=cv2.INTER_LINEAR)
+    if signed:
+        normalized = np.clip(magnitude / max(float(scale), 1e-12), -1, 1)
+        indexed = ((normalized + 1.0) * 127.5).astype(np.uint8)
+        return np.ascontiguousarray(cv2.applyColorMap(
+            indexed, cv2.COLORMAP_JET)[..., ::-1])
+    normalized = np.clip(magnitude / max(float(scale), 1e-12), 0, 1)
+    return np.ascontiguousarray(cv2.applyColorMap(
+        (normalized * 255).astype(np.uint8), cv2.COLORMAP_INFERNO)[..., ::-1])
+
+
+def _label_panel(panel: np.ndarray, title: str) -> np.ndarray:
+    """Add a consistent title strip to one visualization panel."""
+    panel = np.asarray(panel, np.uint8).copy()
+    cv2.rectangle(panel, (0, 0), (panel.shape[1], 25), (15, 15, 20), -1)
+    cv2.putText(panel, title, (7, 18), cv2.FONT_HERSHEY_SIMPLEX,
+                0.48, (245, 245, 245), 1, cv2.LINE_AA)
+    return panel
+
+
+def _resolve_ffmpeg() -> str:
+    """Find ffmpeg even when the evaluator was launched with a short PATH."""
+    candidates = [
+        os.environ.get("FFMPEG_BINARY"),
+        shutil.which("ffmpeg"),
+        "/home/ec2-user/miniconda3/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    raise IOError(
+        "ffmpeg encoder not found; set FFMPEG_BINARY or add ffmpeg to PATH")
+
+
 def compose_frame(rgb: np.ndarray, error: np.ndarray, scale: float,
                   active=None, visible=None, expected=None, causal=None) -> np.ndarray:
     """Compose RGB, annotation, denoising-error heatmap, and overlay panels."""
@@ -71,20 +111,59 @@ def compose_frame(rgb: np.ndarray, error: np.ndarray, scale: float,
     causal = None if causal is None else cv2.resize(
         np.asarray(causal, np.uint8), (w, h), interpolation=cv2.INTER_NEAREST) > 0
     annotation = annotation_overlay(rgb, active, visible, expected, causal)
-    magnitude = cv2.resize(np.asarray(error, np.float32), (w, h),
-                           interpolation=cv2.INTER_LINEAR)
-    normalized = np.clip(magnitude / max(float(scale), 1e-12), 0, 1)
-    heat = np.ascontiguousarray(cv2.applyColorMap(
-        (normalized * 255).astype(np.uint8), cv2.COLORMAP_INFERNO)[..., ::-1])
+    heat = _heatmap(error, w, h, scale)
     overlay = (0.45 * rgb + 0.55 * heat).astype(np.uint8)
-    panels = [(np.ascontiguousarray(rgb), "RGB"),
-              (np.ascontiguousarray(annotation), "ANNOTATIONS"),
-              (heat, "DENOISING ERROR"), (overlay, "ERROR OVERLAY")]
-    for panel, title in panels:
-        cv2.rectangle(panel, (0, 0), (w, 25), (15, 15, 20), -1)
-        cv2.putText(panel, title, (7, 18), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.48, (245, 245, 245), 1, cv2.LINE_AA)
-    return np.concatenate([panel for panel, _ in panels], axis=1)
+    panels = [_label_panel(rgb, "RGB"),
+              _label_panel(annotation, "ANNOTATIONS"),
+              _label_panel(heat, "DENOISING ERROR"),
+              _label_panel(overlay, "ERROR OVERLAY")]
+    return np.concatenate(panels, axis=1)
+
+
+def compose_pair_frame(valid_rgb: np.ndarray, invalid_rgb: np.ndarray,
+                       invalid_error: np.ndarray, valid_error: np.ndarray,
+                       difference: np.ndarray, raw_scale: float,
+                       difference_scale: float, frame_index: int,
+                       invalid_loss: float, valid_loss: float,
+                       active=None, visible=None, expected=None,
+                       causal=None) -> np.ndarray:
+    """Compose one synchronized valid/invalid pair frame.
+
+    The delta panel is the signed invalid-minus-valid residual. Red means the
+    invalid clip has higher error; blue means the valid clip has higher error.
+    """
+    invalid_rgb = _resize(invalid_rgb)
+    valid_rgb = _resize(valid_rgb)
+    height, width = invalid_rgb.shape[:2]
+    resize_mask = lambda value: None if value is None else cv2.resize(
+        np.asarray(value, np.uint8), (width, height),
+        interpolation=cv2.INTER_NEAREST) > 0
+    annotation = annotation_overlay(
+        invalid_rgb, resize_mask(active), resize_mask(visible),
+        resize_mask(expected), resize_mask(causal))
+    invalid_heat = _heatmap(invalid_error, width, height, raw_scale)
+    valid_heat = _heatmap(valid_error, width, height, raw_scale)
+    difference_heat = _heatmap(
+        difference, width, height, difference_scale, signed=True)
+    invalid_overlay = (0.45 * invalid_rgb + 0.55 * invalid_heat).astype(np.uint8)
+    difference_overlay = (0.45 * invalid_rgb + 0.55 * difference_heat).astype(np.uint8)
+    panels = [
+        _label_panel(valid_rgb, "VALID RGB"),
+        _label_panel(invalid_rgb, "INVALID RGB"),
+        _label_panel(annotation, "ANNOTATIONS"),
+        _label_panel(invalid_heat, "INVALID ERROR"),
+        _label_panel(valid_heat, "VALID ERROR"),
+        _label_panel(difference_heat, "DELTA: INVALID - VALID"),
+        _label_panel(invalid_overlay, "INVALID OVERLAY"),
+        _label_panel(difference_overlay, "DELTA OVERLAY"),
+    ]
+    canvas = np.concatenate(panels, axis=1)
+    cv2.putText(canvas, "frame %d | valid PPE %.4f | invalid PPE %.4f | delta %.4f"
+                % (frame_index, valid_loss, invalid_loss,
+                   invalid_loss - valid_loss),
+                (7, height - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                (255, 255, 255), 1, cv2.LINE_AA)
+    return canvas
 
 
 def _raw_annotations(sample, indices: Sequence[int]):
@@ -117,9 +196,7 @@ def render_clip(sample, error: np.ndarray, indices: Sequence[int], scale: float,
                   if annotations is not None else {})
         frames.append(compose_frame(rgb, errors[t], scale, **kwargs))
     height, width = frames[0].shape[:2]
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is None:
-        raise IOError("ffmpeg is required to write VS Code-compatible H.264 video")
+    ffmpeg = _resolve_ffmpeg()
     command = [
         ffmpeg, "-y", "-loglevel", "error",
         "-f", "rawvideo", "-vcodec", "rawvideo",
@@ -140,6 +217,56 @@ def render_clip(sample, error: np.ndarray, indices: Sequence[int], scale: float,
         process.wait()
         raise
     _clip_summary(sample, error, indices, scale, output_png, annotation_sample)
+
+
+def render_pair_clip(valid_runtime: Dict, invalid_runtime: Dict,
+                     raw_scale: float, difference_scale: float,
+                     output_mp4: str) -> None:
+    """Write one combined valid/invalid/difference visualization video."""
+    valid_sample = valid_runtime["sample"]
+    invalid_sample = invalid_runtime["sample"]
+    indices = np.asarray(invalid_runtime["indices"], int)
+    valid_source = np.asarray(valid_sample.video)[np.clip(
+        indices, 0, valid_sample.num_frames - 1)]
+    invalid_source = np.asarray(invalid_sample.video)[np.clip(
+        indices, 0, invalid_sample.num_frames - 1)]
+    valid_errors = expand_error_grid(valid_runtime["grid"], len(indices))
+    invalid_errors = expand_error_grid(invalid_runtime["grid"], len(indices))
+    differences = invalid_errors - valid_errors
+    annotations = _raw_annotations(invalid_sample, indices)
+    valid_loss = float(valid_runtime["info"]["loss"])
+    invalid_loss = float(invalid_runtime["info"]["loss"])
+    frames = []
+    for t in range(len(indices)):
+        kwargs = ({name: annotations[name][t] for name in
+                   ("active", "visible", "expected", "causal")}
+                  if annotations is not None else {})
+        frames.append(compose_pair_frame(
+            valid_source[t], invalid_source[t], invalid_errors[t],
+            valid_errors[t], differences[t], raw_scale, difference_scale,
+            t, invalid_loss, valid_loss, **kwargs))
+    os.makedirs(os.path.dirname(output_mp4), exist_ok=True)
+    height, width = frames[0].shape[:2]
+    ffmpeg = _resolve_ffmpeg()
+    command = [
+        ffmpeg, "-y", "-loglevel", "error",
+        "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-pix_fmt", "bgr24", "-s", "%dx%d" % (width, height),
+        "-r", str(max(1.0, float(invalid_sample.fps))), "-i", "-",
+        "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart", output_mp4,
+    ]
+    process = subprocess.Popen(command, stdin=subprocess.PIPE)
+    try:
+        for frame in frames:
+            process.stdin.write(np.ascontiguousarray(frame[..., ::-1]).tobytes())
+        process.stdin.close()
+        if process.wait() != 0:
+            raise IOError("ffmpeg could not encode H.264 video: %s" % output_mp4)
+    except Exception:
+        process.kill()
+        process.wait()
+        raise
 
 
 def _pyplot():
@@ -209,11 +336,18 @@ def render_pair_summary(valid_runtime: Dict, invalid_runtime: Dict,
     valid = temporal_metrics(valid_runtime["grid"], sample, indices)
     invalid = temporal_metrics(invalid_runtime["grid"], sample, indices)
     x = np.arange(len(invalid["rgb_frame_ppe"]))
+    difference = (np.asarray(invalid["rgb_frame_ppe"], np.float64)
+                  - np.asarray(valid["rgb_frame_ppe"], np.float64))
     fig, ax = plt.subplots(figsize=(11, 4.5))
     ax.plot(x, valid["rgb_frame_ppe"], label="valid denoising error",
             color="#39a96b")
     ax.plot(x, invalid["rgb_frame_ppe"], label="invalid denoising error",
             color="#d84a4a")
+    difference_ax = ax.twinx()
+    difference_ax.plot(x, difference, label="invalid - valid",
+                       color="#6f42c1", linestyle="--", alpha=.9)
+    difference_ax.axhline(0.0, color="#6f42c1", linewidth=.7, alpha=.35)
+    difference_ax.set_ylabel("invalid - valid PPE", color="#6f42c1")
     clocks = invalid["latent_clocks"]
     for label, colour in (("active", "#ff7777"), ("consequence", "#7698d8")):
         expanded = np.zeros(len(x), bool)
@@ -221,11 +355,15 @@ def render_pair_summary(valid_runtime: Dict, invalid_runtime: Dict,
             expanded[frames] = bool(clocks[label][t])
         ax.fill_between(x, 0, 1, where=expanded, transform=ax.get_xaxis_transform(),
                         color=colour, alpha=.15, label=label)
-    ax.set(title="Pair denoising-error trace: %s" % sample.uid,
+    ax.set(title="Pair denoising-error trace: %s | valid PPE %.4f, invalid PPE %.4f"
+           % (sample.uid, valid_runtime["info"]["loss"],
+              invalid_runtime["info"]["loss"]),
            xlabel="sampled RGB frame",
-           ylabel="mean squared denoising error")
+            ylabel="mean squared denoising error")
     ax.grid(alpha=.25)
-    ax.legend(ncol=4)
+    handles, labels = ax.get_legend_handles_labels()
+    delta_handles, delta_labels = difference_ax.get_legend_handles_labels()
+    ax.legend(handles + delta_handles, labels + delta_labels, ncol=5)
     fig.tight_layout()
     os.makedirs(os.path.dirname(output_png), exist_ok=True)
     fig.savefig(output_png, dpi=170)
@@ -234,29 +372,33 @@ def render_pair_summary(valid_runtime: Dict, invalid_runtime: Dict,
 
 def render_pair_artifacts(run_dir: str, pair, runtime: Dict[str, Dict],
                           model: str = "model") -> None:
-    """Render every available clip and valid/invalid pair in one group."""
+    """Render one combined artifact set for every valid/invalid pair."""
     available = [entry for entry in runtime.values() if entry.get("grid") is not None]
     if not available:
         return
     pool = np.concatenate([entry["grid"].ravel() for entry in available])
     positive = pool[pool > 0]
-    scale = float(np.percentile(positive, 99.0)) if positive.size else 1.0
-    clips_dir = os.path.join(run_dir, "visualizations", "clips", _safe(model))
-    pairs_dir = os.path.join(run_dir, "visualizations", "pairs", _safe(model))
+    raw_scale = float(np.percentile(positive, 99.0)) if positive.size else 1.0
     valid = runtime.get(pair.valid.uid)
-    if valid is not None and valid.get("grid") is not None:
-        stem = _safe(pair.valid.uid)
-        render_clip(pair.valid, valid["grid"], valid["indices"], scale,
-                    os.path.join(clips_dir, stem + ".mp4"),
-                    os.path.join(clips_dir, stem + ".png"))
+    if valid is None or valid.get("grid") is None:
+        return
+    differences = [
+        runtime[sample.uid]["grid"] - valid["grid"]
+        for sample in pair.invalids
+        if runtime.get(sample.uid, {}).get("grid") is not None
+    ]
+    delta_values = np.concatenate([value.ravel() for value in differences]) \
+        if differences else np.asarray([], np.float32)
+    difference_scale = (float(np.percentile(np.abs(delta_values), 99.0))
+                        if delta_values.size else 1.0)
+    output_dir = os.path.join(run_dir, "visualizations", _safe(model))
     for invalid_sample in pair.invalids:
         invalid = runtime.get(invalid_sample.uid)
         if invalid is None or invalid.get("grid") is None:
             continue
         stem = _safe(invalid_sample.uid)
-        render_clip(invalid_sample, invalid["grid"], invalid["indices"], scale,
-                    os.path.join(clips_dir, stem + ".mp4"),
-                    os.path.join(clips_dir, stem + ".png"), invalid_sample)
-        if valid is not None and valid.get("grid") is not None:
-            render_pair_summary(valid, invalid,
-                                os.path.join(pairs_dir, stem + "_pair.png"))
+        render_pair_clip(
+            valid, invalid, raw_scale, difference_scale,
+            os.path.join(output_dir, stem + ".mp4"))
+        render_pair_summary(
+            valid, invalid, os.path.join(output_dir, stem + ".png"))
