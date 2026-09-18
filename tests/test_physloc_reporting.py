@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest import mock
 
 from utils.physloc_reporting import (
     category_summaries, severity_sensitivity, tidy_rows,
@@ -38,6 +39,19 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual(result["full_ladder"]["count"], 0)
         self.assertEqual(result["ordered_pair_accuracy"]["strong>weak"]["count"], 1)
 
+    def test_duplicate_severity_replicates_are_averaged(self):
+        group = {
+            "valid": {"v": {"loss": 1.0}},
+            "weak_a": {"a": _info("weak", 1.1)},
+            "weak_b": {"b": _info("weak", 1.3)},
+            "medium": {"m": _info("medium", 1.4)},
+            "strong": {"s": _info("strong", 1.8)},
+        }
+        matched = severity_sensitivity(tidy_rows({"pair": group}))["matched_groups"][0]
+        self.assertAlmostEqual(matched["gaps"]["weak"], 0.2)
+        self.assertEqual(matched["replicate_counts"]["weak"], 2)
+        self.assertTrue(matched["full_ladder"])
+
     def test_categories_and_csv(self):
         rows = tidy_rows({"pair": {"valid": {"v": {"loss": 1.0}},
                                     "x": {"i": _info("strong", 1.5)}}})
@@ -62,6 +76,22 @@ class ReportingTests(unittest.TestCase):
                 root + "/analysis/data/category_summary_model.csv"))
             self.assertTrue(__import__("os").path.exists(
                 root + "/analysis/plots/model/severity_base_ppe.png"))
+
+    def test_plot_failure_does_not_discard_csv_outputs(self):
+        rows = tidy_rows({"pair": {
+            "valid": {"v": {"loss": 1.0}},
+            "x": {"i": _info("strong", 1.5)},
+        }})
+        categories = category_summaries(rows)
+        severity = severity_sensitivity(rows)
+        with tempfile.TemporaryDirectory() as root, mock.patch(
+                "utils.physloc_reporting._plot_category_heatmaps",
+                side_effect=RuntimeError("render failed")):
+            warnings = write_analysis_bundle(
+                root, "model", rows, categories, severity)
+            self.assertEqual(len(warnings), 1)
+            self.assertTrue(__import__("os").path.exists(
+                root + "/analysis/data/metrics_model.csv"))
 
 
 if __name__ == "__main__":

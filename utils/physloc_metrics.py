@@ -1,7 +1,7 @@
 """Pure NumPy helpers for PhysLoc PPE localization and aggregation."""
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -12,6 +12,7 @@ SEVERITY_ORDER = {"weak": 1, "medium": 2, "strong": 3}
 
 
 def normalize_condition(value: object) -> str:
+    """Return the canonical PhysLoc scene-condition label."""
     raw = str(value or "unknown").strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {
         "standard": "standard", "default": "standard",
@@ -25,6 +26,7 @@ def normalize_condition(value: object) -> str:
 
 
 def normalize_difficulty(value: object) -> Optional[str]:
+    """Return ``easy``, ``moderate``, or ``hard`` when recognizable."""
     if isinstance(value, dict):
         value = value.get("level") or value.get("label")
     raw = str(value).strip().lower() if value is not None else ""
@@ -38,16 +40,17 @@ def parse_score_groups(values: Optional[Sequence[str]]) -> Tuple[str, ...]:
     raw: List[str] = []
     for value in values or ("base_ppe",):
         raw.extend(part.strip() for part in str(value).split(",") if part.strip())
-    if "all" in raw:
-        raw = sorted(SCORE_GROUPS)
-    unknown = sorted(set(raw) - SCORE_GROUPS)
+    unknown = sorted(set(raw) - SCORE_GROUPS - {"all"})
     if unknown:
         raise ValueError("unknown score group(s) %s; choose from %s or all"
                          % (unknown, sorted(SCORE_GROUPS)))
+    if "all" in raw:
+        raw = sorted(SCORE_GROUPS)
     return tuple(dict.fromkeys(raw or ("base_ppe",)))
 
 
 def sampled_frame_indices(total_frames: int, requested_frames: int) -> np.ndarray:
+    """Choose evenly spaced source-frame indices, including both endpoints."""
     if total_frames <= 0 or requested_frames <= 0:
         raise ValueError("frame counts must be positive")
     return np.rint(np.linspace(0, total_frames - 1, requested_frames)).astype(int)
@@ -57,6 +60,10 @@ def temporal_bins(sampled_frames: int, latent_frames: int) -> List[np.ndarray]:
     """Map sampled RGB frames to latent frames, preserving 4k+1-style bins."""
     if sampled_frames <= 0 or latent_frames <= 0:
         raise ValueError("frame counts must be positive")
+    if latent_frames > sampled_frames:
+        raise ValueError(
+            "cannot map %d sampled frames onto %d non-empty latent bins"
+            % (sampled_frames, latent_frames))
     if latent_frames == sampled_frames:
         return [np.asarray([i], int) for i in range(sampled_frames)]
     if latent_frames == 1:
@@ -92,6 +99,8 @@ def project_volume(value: np.ndarray, source_indices: Sequence[int],
                    target_shape: Tuple[int, int, int],
                    reduction: str = "max") -> np.ndarray:
     """Project a source ``[T,H,W]`` annotation onto an arbitrary latent grid."""
+    if reduction not in {"max", "mean"}:
+        raise ValueError("reduction must be 'max' or 'mean', not %r" % reduction)
     source = np.asarray(value)
     if source.ndim != 3:
         raise ValueError("annotation must be [T,H,W], got %s" % (source.shape,))
@@ -109,11 +118,13 @@ def project_volume(value: np.ndarray, source_indices: Sequence[int],
 
 def project_mask(value: np.ndarray, source_indices: Sequence[int],
                  target_shape: Tuple[int, int, int]) -> np.ndarray:
+    """Project a binary annotation to the evaluator's latent token grid."""
     return project_volume(value, source_indices, target_shape, "max") > 0
 
 
 def project_trace(value: np.ndarray, source_indices: Sequence[int],
                   latent_frames: int, reduction: str = "max") -> np.ndarray:
+    """Sample and temporally reduce a source trace to latent-frame length."""
     source = np.asarray(value)
     indices = np.clip(np.asarray(source_indices, int), 0, len(source) - 1)
     sampled = source[indices]
@@ -125,6 +136,7 @@ def project_trace(value: np.ndarray, source_indices: Sequence[int],
 
 
 def expand_latent_trace(trace: Sequence[float], sampled_frames: int) -> np.ndarray:
+    """Repeat latent-frame values over their corresponding RGB-frame bins."""
     trace = np.asarray(trace, np.float64)
     out = np.zeros(sampled_frames, np.float64)
     for index, frames in enumerate(temporal_bins(sampled_frames, len(trace))):
@@ -134,6 +146,7 @@ def expand_latent_trace(trace: Sequence[float], sampled_frames: int) -> np.ndarr
 
 def masked_mean(error: np.ndarray, mask: np.ndarray,
                 weights: Optional[np.ndarray] = None) -> Tuple[Optional[float], Optional[str]]:
+    """Compute a masked (optionally weighted) mean and an availability reason."""
     error = np.asarray(error, np.float64)
     selected = np.asarray(mask, bool)
     if error.shape != selected.shape:
@@ -141,9 +154,19 @@ def masked_mean(error: np.ndarray, mask: np.ndarray,
                          % (error.shape, selected.shape))
     if not selected.any():
         return None, "empty_region"
+    if not np.isfinite(error[selected]).all():
+        return None, "non_finite_error"
     if weights is None:
         return float(error[selected].mean()), None
-    weight = np.asarray(weights, np.float64) * selected
+    weight = np.asarray(weights, np.float64)
+    if weight.shape != error.shape:
+        raise ValueError("error and weight shapes differ: %s vs %s"
+                         % (error.shape, weight.shape))
+    if not np.isfinite(weight[selected]).all():
+        return None, "non_finite_weight"
+    if (weight[selected] < 0).any():
+        return None, "negative_weight"
+    weight = weight * selected
     total = float(weight.sum())
     if total <= 0:
         return None, "zero_severity_weight"
@@ -153,10 +176,22 @@ def masked_mean(error: np.ndarray, mask: np.ndarray,
 def average_precision(scores: np.ndarray, positives: np.ndarray,
                       candidates: Optional[np.ndarray] = None
                       ) -> Tuple[Optional[float], Optional[str]]:
-    """Average precision with stable tie handling and no sklearn dependency."""
+    """Compute threshold-based AP with tie-invariant ranking.
+
+    All tokens with the same score enter the prediction set together. This
+    avoids making AP depend on array traversal order when PPE values are tied.
+    """
     score = np.asarray(scores, np.float64)
     truth = np.asarray(positives, bool)
-    domain = np.ones(truth.shape, bool) if candidates is None else np.asarray(candidates, bool)
+    if score.shape != truth.shape:
+        raise ValueError("score and positive shapes differ: %s vs %s"
+                         % (score.shape, truth.shape))
+    domain = (np.ones(truth.shape, bool) if candidates is None
+              else np.asarray(candidates, bool))
+    if domain.shape != truth.shape:
+        raise ValueError("candidate and positive shapes differ: %s vs %s"
+                         % (domain.shape, truth.shape))
+    domain &= np.isfinite(score)
     truth = truth & domain
     if not truth.any():
         return None, "no_positive_tokens"
@@ -164,21 +199,27 @@ def average_precision(scores: np.ndarray, positives: np.ndarray,
         return None, "no_negative_tokens"
     y = truth[domain]
     s = score[domain]
-    order = np.argsort(-s, kind="mergesort")
+    order = np.argsort(-s, kind="stable")
     y = y[order]
-    precision = np.cumsum(y) / np.arange(1, len(y) + 1)
-    return float(precision[y].mean()), None
+    s = s[order]
+    threshold_ends = np.r_[np.flatnonzero(s[1:] != s[:-1]) + 1, len(s)]
+    true_positives = np.cumsum(y)[threshold_ends - 1]
+    recall = true_positives / int(y.sum())
+    precision = true_positives / threshold_ends
+    recall_increments = np.diff(np.r_[0.0, recall])
+    return float(np.sum(recall_increments * precision)), None
 
 
 def error_ratio(error: np.ndarray, target: np.ndarray,
                 outside: np.ndarray) -> Tuple[Optional[float], Optional[str]]:
+    """Return target PPE divided by comparison-region PPE."""
     inside, reason = masked_mean(error, target)
     if reason:
         return None, reason
     baseline, reason = masked_mean(error, outside)
     if reason:
         return None, reason
-    if baseline == 0:
+    if abs(baseline) <= np.finfo(np.float64).eps:
         return None, "zero_outside_error"
     return float(inside / baseline), None
 
@@ -187,7 +228,10 @@ def annotation_grids(sample, source_indices: Sequence[int],
                      target_shape: Tuple[int, int, int]) -> Dict[str, np.ndarray]:
     """Build the canonical PhysLoc regions on an evaluator latent grid."""
     timeline = sample.timeline
-    gate = lambda name: np.asarray(timeline[name], bool)[:, None, None]
+    def timeline_gate(name: str) -> np.ndarray:
+        """Expand a named temporal clock over the two spatial axes."""
+        return np.asarray(timeline[name], bool)[:, None, None]
+
     segmentation = np.asarray(sample.segmentations)
     twin_segmentation = (np.asarray(sample.twin.segmentations)
                          if sample.twin is not None else segmentation)
@@ -196,10 +240,12 @@ def annotation_grids(sample, source_indices: Sequence[int],
         "violating_object": np.asarray(sample.violator_mask, bool),
         "active_violation": np.asarray(sample.violation_mask, bool),
         "active_violation_visible": np.asarray(sample.visible_violation, bool),
-        "expected_object": np.asarray(sample.reference_mask, bool) & gate("consequence"),
-        "violating_object_active": (np.asarray(sample.violator_mask, bool)
-                                     & gate("active")),
-        "causal_consequence": (np.asarray(sample.causal) == 2) & gate("consequence"),
+        "expected_object": (np.asarray(sample.reference_mask, bool)
+                            & timeline_gate("consequence")),
+        "active_violating_object": (np.asarray(sample.violator_mask, bool)
+                                    & timeline_gate("active")),
+        "causal_consequence": ((np.asarray(sample.causal) == 2)
+                               & timeline_gate("consequence")),
         "foreground": foreground,
     }
     grids = {name: project_mask(value, source_indices, target_shape)
@@ -214,13 +260,14 @@ def annotation_grids(sample, source_indices: Sequence[int],
 
 
 def _metric(value: Optional[float], reason: Optional[str]) -> Dict[str, object]:
+    """Package a nullable metric with explicit availability metadata."""
     return {"value": value, "available": reason is None, "reason": reason}
 
 
-def localization_metrics(error: np.ndarray, grids: Dict[str, np.ndarray]
+def localization_metrics(error: np.ndarray, grids: Mapping[str, np.ndarray]
                          ) -> Dict[str, Dict[str, object]]:
     """Compute per-clip spatial and spatio-temporal localization metrics."""
-    regions = ("violating_object", "active_violation",
+    regions = ("violating_object", "active_violating_object", "active_violation",
                "active_violation_visible", "expected_object",
                "causal_consequence")
     spatial: Dict[str, object] = {}

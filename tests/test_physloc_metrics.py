@@ -34,18 +34,35 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(set(parse_score_groups(["all"])),
                          {"base_ppe", "temporal_ppe", "spatial_ppe", "spatiotemporal_ppe"})
         self.assertEqual(normalize_condition("camera+multi"), "multi_motion")
+        with self.assertRaises(ValueError):
+            parse_score_groups(["all,not_a_score"])
+
+    def test_temporal_bins_reject_empty_latent_bins(self):
+        with self.assertRaisesRegex(ValueError, "non-empty latent bins"):
+            temporal_bins(2, 3)
 
     def test_masked_mean_and_weighted_mean(self):
         error = np.array([1.0, 3.0])
         mask = np.array([True, True])
         self.assertEqual(masked_mean(error, mask)[0], 2.0)
         self.assertEqual(masked_mean(error, mask, np.array([0.0, 1.0]))[0], 3.0)
+        self.assertEqual(
+            masked_mean(np.array([np.nan]), np.array([True]))[1],
+            "non_finite_error",
+        )
 
     def test_ap_and_ratio(self):
         error = np.array([0.1, 0.9, 0.2, 0.8])
         target = np.array([False, True, False, True])
         self.assertEqual(average_precision(error, target)[0], 1.0)
         self.assertAlmostEqual(error_ratio(error, target, ~target)[0], 0.85 / 0.15)
+
+    def test_ap_is_invariant_to_tied_token_order(self):
+        scores = np.array([1.0, 1.0])
+        first = average_precision(scores, np.array([True, False]))[0]
+        second = average_precision(scores, np.array([False, True]))[0]
+        self.assertEqual(first, 0.5)
+        self.assertEqual(first, second)
 
     def test_empty_metrics_are_explicit(self):
         score, reason = average_precision(np.ones(3), np.zeros(3, bool))
@@ -79,6 +96,8 @@ class MetricTests(unittest.TestCase):
         error[1, 0, 0] = 2.0
         result = localization_metrics(error, grids)
         self.assertEqual(result["spatial"]["active_violation"]["ppe"]["value"], 2.0)
+        self.assertIn("active_violating_object", result["spatial"])
+        self.assertIn("active_violating_object_ap", result["spatiotemporal"])
 
     def test_temporal_metrics_keep_native_and_projected_traces(self):
         class Fake:

@@ -6,7 +6,7 @@ import math
 import os
 import re
 from collections import defaultdict
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -16,7 +16,9 @@ from .physloc_metrics import SEVERITY_ORDER
 TAXONOMY_FIELDS = ("family", "severity", "complexity", "condition", "difficulty")
 
 
-def _pair_row(pair_uid, sample_uid, taxonomy, score, pair):
+def _pair_row(pair_uid: str, sample_uid: str, taxonomy: Dict[str, object],
+              score: str, pair: Dict[str, object]) -> Dict[str, object]:
+    """Convert a valid/invalid PPE comparison to one tidy result row."""
     return {
         "pair_uid": pair_uid, "sample_uid": sample_uid,
         **{key: taxonomy.get(key) for key in TAXONOMY_FIELDS},
@@ -31,6 +33,7 @@ def _pair_row(pair_uid, sample_uid, taxonomy, score, pair):
 
 
 def tidy_rows(results: Dict[str, object]) -> List[Dict[str, object]]:
+    """Flatten nested PhysLoc results into analysis-friendly records."""
     rows: List[Dict[str, object]] = []
     for pair_uid, subgroup in results.items():
         for variation, samples in subgroup.items():
@@ -81,7 +84,11 @@ def tidy_rows(results: Dict[str, object]) -> List[Dict[str, object]]:
     return rows
 
 
-def _localization_row(pair_uid, sample_uid, taxonomy, score, metric, kind):
+def _localization_row(pair_uid: str, sample_uid: str,
+                      taxonomy: Dict[str, object], score: str,
+                      metric: Dict[str, object], kind: str
+                      ) -> Dict[str, object]:
+    """Convert a nullable localization metric to one tidy result row."""
     return {
         "pair_uid": pair_uid, "sample_uid": sample_uid,
         **{key: taxonomy.get(key) for key in TAXONOMY_FIELDS},
@@ -93,6 +100,7 @@ def _localization_row(pair_uid, sample_uid, taxonomy, score, metric, kind):
 
 
 def _summary(values: Sequence[float]) -> Dict[str, object]:
+    """Return count, mean, sample deviation, and normal 95% CI half-width."""
     a = np.asarray(values, np.float64)
     if not len(a):
         return {"count": 0, "mean": None, "std": None, "ci95": None}
@@ -102,6 +110,7 @@ def _summary(values: Sequence[float]) -> Dict[str, object]:
 
 
 def category_summaries(rows: Sequence[Dict[str, object]]) -> List[Dict[str, object]]:
+    """Aggregate every available score over each PhysLoc taxonomy axis."""
     out = []
     for dimension in ("severity", "complexity", "condition", "difficulty"):
         grouped = defaultdict(list)
@@ -125,6 +134,7 @@ def category_summaries(rows: Sequence[Dict[str, object]]) -> List[Dict[str, obje
 
 
 def _rankdata(values: Sequence[float]) -> np.ndarray:
+    """Assign average one-based ranks, including tied values."""
     values = np.asarray(values, np.float64)
     order = np.argsort(values, kind="mergesort")
     ranks = np.empty(len(values), np.float64)
@@ -139,6 +149,7 @@ def _rankdata(values: Sequence[float]) -> np.ndarray:
 
 
 def _spearman(values: Sequence[float]) -> Optional[float]:
+    """Compute rank correlation for severity-ordered score values."""
     if len(values) < 2:
         return None
     x = np.arange(1, len(values) + 1, dtype=np.float64)
@@ -150,7 +161,7 @@ def _spearman(values: Sequence[float]) -> Optional[float]:
 
 def severity_sensitivity(rows: Sequence[Dict[str, object]]) -> Dict[str, object]:
     """Matched weak/medium/strong ordering based only on unweighted PPE gaps."""
-    matched = defaultdict(dict)
+    matched = defaultdict(lambda: defaultdict(list))
     excluded_weighted = "spatial_severity_weighted:"
     for row in rows:
         if row.get("kind") != "pair_ppe" or row.get("ppe_gap") is None:
@@ -161,10 +172,14 @@ def severity_sensitivity(rows: Sequence[Dict[str, object]]) -> Dict[str, object]
         if severity not in SEVERITY_ORDER:
             continue
         key = (row["pair_uid"], row.get("family"), row["score"])
-        matched[key][severity] = float(row["ppe_gap"])
+        matched[key][severity].append(float(row["ppe_gap"]))
 
     group_rows = []
-    for (pair_uid, family, score), ladder in sorted(matched.items()):
+    for (pair_uid, family, score), observations in sorted(matched.items()):
+        # Multiple clips can legitimately share a matched key and severity.
+        # Average replicates instead of silently retaining the last row.
+        ladder = {name: float(np.mean(values))
+                  for name, values in observations.items()}
         ordered = [name for name in ("weak", "medium", "strong") if name in ladder]
         comparisons = {}
         for lower, upper in (("weak", "medium"), ("medium", "strong"),
@@ -175,13 +190,17 @@ def severity_sensitivity(rows: Sequence[Dict[str, object]]) -> Dict[str, object]
         group_rows.append({
             "pair_uid": pair_uid, "family": family, "score": score,
             "gaps": dict(ladder), "available_severities": ordered,
+            "replicate_counts": {name: len(values)
+                                 for name, values in observations.items()},
             "comparisons": comparisons,
             "full_ladder": (ladder["weak"] < ladder["medium"] < ladder["strong"]
                             if len(ladder) == 3 else None),
             "spearman": _spearman([ladder[name] for name in ordered]),
         })
 
-    def summarize(items, score, family=None):
+    def summarize(items: Sequence[Dict[str, object]], score: str,
+                  family: Optional[str] = None) -> Dict[str, object]:
+        """Summarize ordering accuracy for one score/family selection."""
         comparison = {}
         for key in ("medium>weak", "strong>medium", "strong>weak"):
             values = [row["comparisons"][key] for row in items
@@ -212,7 +231,9 @@ def severity_sensitivity(rows: Sequence[Dict[str, object]]) -> Dict[str, object]
 
 
 def write_csv(path: str, rows: Sequence[Dict[str, object]]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    """Write tidy per-sample metrics using a stable column order."""
+    if os.path.dirname(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
     fields = ("pair_uid", "sample_uid") + TAXONOMY_FIELDS + (
         "kind", "score", "value", "valid_ppe", "invalid_ppe", "ppe_gap",
         "detected", "available", "reason")
@@ -223,10 +244,13 @@ def write_csv(path: str, rows: Sequence[Dict[str, object]]) -> None:
 
 
 def _safe(value: object) -> str:
+    """Convert an arbitrary label to a filesystem-safe component."""
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("_")
 
 
-def _write_category_csv(path, summaries):
+def _write_category_csv(path: str,
+                        summaries: Sequence[Dict[str, object]]) -> None:
+    """Write flattened category summaries to CSV."""
     fields = ("dimension", "category", "score", "kind", "count", "mean",
               "std", "ci95", "gap_count", "gap_mean", "gap_std", "gap_ci95",
               "detection_rate", "misrank_rate")
@@ -248,7 +272,8 @@ def _write_category_csv(path, summaries):
             })
 
 
-def _write_severity_csv(path, severity):
+def _write_severity_csv(path: str, severity: Dict[str, object]) -> None:
+    """Write matched severity ladders to CSV."""
     fields = ("pair_uid", "family", "score", "weak_gap", "medium_gap",
               "strong_gap", "medium_gt_weak", "strong_gt_medium",
               "strong_gt_weak", "full_ladder", "spearman")
@@ -272,6 +297,7 @@ def _write_severity_csv(path, severity):
 
 
 def _pyplot():
+    """Load a headless pyplot backend with writable cache locations."""
     os.environ.setdefault("MPLCONFIGDIR", "/data/tmp/matplotlib")
     os.environ.setdefault("XDG_CACHE_HOME", "/data/tmp/cache")
     import matplotlib
@@ -280,7 +306,9 @@ def _pyplot():
     return plt
 
 
-def _plot_category_heatmaps(summaries, plot_dir):
+def _plot_category_heatmaps(summaries: Sequence[Dict[str, object]],
+                            plot_dir: str) -> None:
+    """Plot score-by-category mean heatmaps."""
     plt = _pyplot()
     for dimension in ("severity", "complexity", "condition", "difficulty"):
         subset = [row for row in summaries if row["dimension"] == dimension]
@@ -308,7 +336,9 @@ def _plot_category_heatmaps(summaries, plot_dir):
             plt.close(fig)
 
 
-def _plot_base_category_bars(summaries, plot_dir):
+def _plot_base_category_bars(summaries: Sequence[Dict[str, object]],
+                             plot_dir: str) -> None:
+    """Plot base-PPE valid-relative gaps with confidence intervals."""
     plt = _pyplot()
     for dimension in ("severity", "complexity", "condition", "difficulty"):
         rows = [row for row in summaries
@@ -332,7 +362,9 @@ def _plot_base_category_bars(summaries, plot_dir):
         plt.close(fig)
 
 
-def _plot_severity(rows, severity, plot_dir):
+def _plot_severity(rows: Sequence[Dict[str, object]],
+                   severity: Dict[str, object], plot_dir: str) -> None:
+    """Plot severity trends and matched-ladder ordering accuracy."""
     plt = _pyplot()
     pair_rows = [row for row in rows if row["kind"] == "pair_ppe"
                  and row.get("severity") in SEVERITY_ORDER
@@ -351,7 +383,8 @@ def _plot_severity(rows, severity, plot_dir):
             xs, ys = [], []
             for index, label in enumerate(labels):
                 if label in group["gaps"]:
-                    xs.append(index); ys.append(group["gaps"][label])
+                    xs.append(index)
+                    ys.append(group["gaps"][label])
             ax.plot(xs, ys, color="#999999", alpha=.18, linewidth=.8)
         means = [item["mean"] if item["mean"] is not None else np.nan
                  for item in summaries]
@@ -409,16 +442,30 @@ def _plot_severity(rows, severity, plot_dir):
 def write_analysis_bundle(run_dir: str, model: str,
                           rows: Sequence[Dict[str, object]],
                           categories: Sequence[Dict[str, object]],
-                          severity: Dict[str, object]) -> None:
+                          severity: Dict[str, object]) -> List[str]:
+    """Write analysis CSVs and best-effort plots.
+
+    CSV failures remain fatal because they indicate an invalid output path or
+    data contract. Plot failures are returned as warnings so optional figures
+    cannot discard an otherwise expensive evaluation run.
+    """
     data_dir = os.path.join(run_dir, "analysis", "data")
     plot_dir = os.path.join(run_dir, "analysis", "plots", _safe(model))
     os.makedirs(plot_dir, exist_ok=True)
     write_csv(os.path.join(data_dir, "metrics_%s.csv" % model), rows)
     _write_category_csv(os.path.join(data_dir, "category_summary_%s.csv" % model), categories)
     _write_severity_csv(os.path.join(data_dir, "severity_ladders_%s.csv" % model), severity)
-    try:
-        _plot_category_heatmaps(categories, plot_dir)
-        _plot_base_category_bars(categories, plot_dir)
-        _plot_severity(rows, severity, plot_dir)
-    except ImportError:
-        print("matplotlib is unavailable; wrote analysis CSV files without plots")
+    warnings = []
+    plot_jobs = (
+        ("category heatmaps", _plot_category_heatmaps, (categories, plot_dir)),
+        ("category bars", _plot_base_category_bars, (categories, plot_dir)),
+        ("severity plots", _plot_severity, (rows, severity, plot_dir)),
+    )
+    for label, function, arguments in plot_jobs:
+        try:
+            function(*arguments)
+        except Exception as exc:  # plotting is optional; metrics are not
+            warning = "%s were not written: %s" % (label, exc)
+            print(warning)
+            warnings.append(warning)
+    return warnings

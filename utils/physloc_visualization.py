@@ -12,15 +12,18 @@ from .physloc_metrics import temporal_bins, temporal_metrics
 
 
 def _safe(value: object) -> str:
+    """Convert an identifier to a safe filename component."""
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("_")
 
 
 def _resize(frame: np.ndarray, width: int = 320) -> np.ndarray:
+    """Resize an image to a fixed width while preserving aspect ratio."""
     height = max(1, int(round(frame.shape[0] * width / frame.shape[1])))
     return cv2.resize(np.asarray(frame), (width, height), interpolation=cv2.INTER_AREA)
 
 
 def expand_error_grid(error: np.ndarray, sampled_frames: int) -> np.ndarray:
+    """Expand latent-frame PPE grids onto sampled RGB-frame bins."""
     value = np.asarray(error, np.float32)
     out = np.zeros((sampled_frames,) + value.shape[1:], np.float32)
     for t, frames in enumerate(temporal_bins(sampled_frames, len(value))):
@@ -29,6 +32,7 @@ def expand_error_grid(error: np.ndarray, sampled_frames: int) -> np.ndarray:
 
 
 def _outline(mask: np.ndarray) -> np.ndarray:
+    """Return a one-pixel morphological outline for a binary mask."""
     mask = np.asarray(mask, np.uint8)
     kernel = np.ones((3, 3), np.uint8)
     return cv2.dilate(mask, kernel) > cv2.erode(mask, kernel)
@@ -53,6 +57,7 @@ def annotation_overlay(rgb: np.ndarray, active: Optional[np.ndarray] = None,
 
 def compose_frame(rgb: np.ndarray, error: np.ndarray, scale: float,
                   active=None, visible=None, expected=None, causal=None) -> np.ndarray:
+    """Compose RGB, annotation, PPE heatmap, and overlay panels."""
     rgb = _resize(rgb)
     h, w = rgb.shape[:2]
     active = None if active is None else cv2.resize(
@@ -81,6 +86,7 @@ def compose_frame(rgb: np.ndarray, error: np.ndarray, scale: float,
 
 
 def _raw_annotations(sample, indices: Sequence[int]):
+    """Load source-resolution masks for selected RGB frames."""
     if sample is None or sample.is_valid:
         return None
     idx = np.clip(np.asarray(indices, int), 0, sample.num_frames - 1)
@@ -96,6 +102,7 @@ def _raw_annotations(sample, indices: Sequence[int]):
 
 def render_clip(sample, error: np.ndarray, indices: Sequence[int], scale: float,
                 output_mp4: str, output_png: str, annotation_sample=None) -> None:
+    """Write one synchronized clip video and representative-frame summary."""
     os.makedirs(os.path.dirname(output_mp4), exist_ok=True)
     source = np.asarray(sample.video)[np.clip(np.asarray(indices, int), 0,
                                               sample.num_frames - 1)]
@@ -119,6 +126,7 @@ def render_clip(sample, error: np.ndarray, indices: Sequence[int], scale: float,
 
 
 def _pyplot():
+    """Load matplotlib with a headless backend and writable cache paths."""
     os.environ.setdefault("MPLCONFIGDIR", "/data/tmp/matplotlib")
     os.environ.setdefault("XDG_CACHE_HOME", "/data/tmp/cache")
     import matplotlib
@@ -128,6 +136,7 @@ def _pyplot():
 
 
 def _clip_summary(sample, error, indices, scale, output_png, annotation_sample):
+    """Write representative frames and synchronized PPE/severity traces."""
     plt = _pyplot()
     frames = np.asarray(sample.video)[np.clip(np.asarray(indices, int), 0,
                                               sample.num_frames - 1)]
@@ -174,6 +183,7 @@ def _clip_summary(sample, error, indices, scale, output_png, annotation_sample):
 
 def render_pair_summary(valid_runtime: Dict, invalid_runtime: Dict,
                         output_png: str) -> None:
+    """Plot valid and invalid temporal PPE traces on shared axes."""
     plt = _pyplot()
     sample = invalid_runtime["sample"]
     indices = invalid_runtime["indices"]
@@ -202,6 +212,7 @@ def render_pair_summary(valid_runtime: Dict, invalid_runtime: Dict,
 
 def render_pair_artifacts(run_dir: str, pair, runtime: Dict[str, Dict],
                           model: str = "model") -> None:
+    """Render every available clip and valid/invalid pair in one group."""
     available = [entry for entry in runtime.values() if entry.get("grid") is not None]
     if not available:
         return
