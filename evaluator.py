@@ -989,6 +989,22 @@ def parse_args():
     parser.add_argument("--exp_name", type=str, default="evaluation_t10_uniform", help="Name of the experiment")
     parser.add_argument("--output_dir", type=str, default="results", help="Output directory")
     parser.add_argument(
+        "--summarize_results", action="store_true",
+        help=("Aggregate existing evaluator result JSON files and exit without "
+              "loading a model."))
+    parser.add_argument(
+        "--summary_results_dir", type=str, default=None,
+        help=("directory to scan with --summarize_results "
+              "(default: --output_dir)"))
+    parser.add_argument(
+        "--summary_output_dir", type=str, default=None,
+        help=("directory for --summarize_results CSV/PNG output "
+              "(default: the scanned directory)"))
+    parser.add_argument(
+        "--summary_weighting", choices=("variation", "dataset"),
+        default="variation",
+        help="weighting used by --summarize_results")
+    parser.add_argument(
         "--visualize", action="store_true",
         help=("PhysLoc: write per-clip MP4/PNG and pair PNG artifacts; "
               "LikePhys: save the legacy denoising preview"))
@@ -1023,6 +1039,15 @@ if __name__ == "__main__":
     import json
 
     args = parse_args()
+    if args.summarize_results:
+        from analysis.results import analyze_results
+
+        analyze_results(
+            args.summary_results_dir or args.output_dir,
+            args.summary_output_dir,
+            args.summary_weighting,
+        )
+        sys.exit(0)
     args.score_groups = parse_score_groups(args.scores)
     if args.data != PHYSLOC and args.score_groups != ("base_ppe",):
         raise ValueError("localized score groups are available only with --data physloc")

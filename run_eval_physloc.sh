@@ -68,3 +68,11 @@ done
 
 wait
 echo "✅ All PhysLoc evaluations done."
+
+# Write one summary per release only after all model workers have finished.
+for seed in "${SEEDS[@]}"; do
+  for release in "${RELEASES[@]}"; do
+    python evaluator.py --summarize_results \
+      --summary_results_dir "results/evaluation_t10_uniform_${seed}_cfg_final_$(basename "$release")"
+  done
+done

@@ -7,6 +7,8 @@ SEEDS=(42)
 # LikePhys scenarios, each a folder of videos under ./data
 DATASETS=(ball_drop ball_collision pendulum block_slide pyramid fluid faucet river flag cloth shadow shadowm)
 MODELS=(animatediff zeroscope modelscope wan2.1-T2V-1.3b hunyuan_t2v ltx-0.9.5 animatediff_sdxl cogvideox mochi cogvideox-5b wan2.1-T2V-14b)
+# Default to the model currently being developed; uncomment/select the list
+# above when launching the full benchmark suite.
 MODELS=(wan2.1-T2V-1.3b)
 FLAGS=("--guidance_scale")
 
@@ -51,3 +53,9 @@ done
 
 wait
 echo "✅ All evaluations done."
+
+# Write one cross-scenario summary per seed after every worker has finished.
+for seed in "${SEEDS[@]}"; do
+  python evaluator.py --summarize_results \
+    --summary_results_dir "results/evaluation_t10_uniform_${seed}_cfg_final"
+done

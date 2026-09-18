@@ -140,10 +140,10 @@ Each PhysLoc result directory contains `analysis/data/` CSV files and `analysis/
 PhysLoc releases are read with the canonical `physloc/loader.py` from the PhysLoc repository rather than a duplicated loader. The default sibling checkout is `/home/ec2-user/code/physloc`; use `--physloc_loader` or `$PHYSLOC_LOADER` elsewhere. To validate the schema-v3 layout, `h5py` dependency, and pairs before spending GPU time:
 
 ```bash
-python -m utils.physloc_dataset --physloc_root ../physloc/out/review_L0_f37
+python -m datasets.physloc --physloc_root ../physloc/out/review_L0_f37
 ```
 
-The evaluation code is organized by responsibility: `benchmarks/likephys.py` and `benchmarks/physloc.py` adapt each dataset to the shared scorer, `benchmarks/common.py` contains cross-benchmark aggregation, and `utils/physloc_*` contains the canonical-loader bridge, localization metrics, reports, and visualization. `evaluator.py` owns only model setup, denoising PPE, CLI configuration, and run persistence.
+The evaluation code is organized by responsibility: `datasets/` owns LikePhys configuration/video discovery and the PhysLoc loader bridge; `benchmarks/` owns benchmark-specific scoring orchestration; `utils/physloc_*` contains localization metrics, reporting, and visualization; and `evaluator.py` owns only model setup, denoising PPE, CLI configuration, and run persistence.
 
 This evaluator intentionally requires schema v3. Passing a schema-v2 `clips/`/NPZ release produces an explicit error before model initialization.
 
@@ -160,10 +160,22 @@ This evaluator intentionally requires schema v3. Passing a schema-v2 `clips/`/NP
 
 ## Results Analysis
 
-After evaluation, use the analysis script to check results
+Every batch script automatically writes a dataset-neutral summary after all
+workers finish. It contains tidy variation-level and model-level CSVs plus a
+PNG chart. To re-create a summary or aggregate both benchmarks together, use
+the evaluator's no-model analysis mode:
 
 ```bash
-python read_exp_final.py
+# One LikePhys experiment
+python evaluator.py --summarize_results \
+  --summary_results_dir results/evaluation_t10_uniform_42_cfg_final
+
+# One PhysLoc experiment
+python evaluator.py --summarize_results \
+  --summary_results_dir results/evaluation_t10_uniform_42_cfg_final_physloc-review_L0_f37
+
+# All experiments beneath results/
+python evaluator.py --summarize_results --summary_results_dir results
 ```
 
 

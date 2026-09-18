@@ -41,7 +41,7 @@ def resolve_root(args: object) -> str:
         print("Downloaded %s to %s"
               % (args.physloc_hub_repo, args.physloc_root))
     args.physloc_prompt = None
-    from utils.physloc_dataset import validate_release
+    from datasets.physloc import validate_release
 
     args.physloc_loader = validate_release(
         args.physloc_root, getattr(args, "physloc_loader", None))
@@ -85,7 +85,7 @@ def iter_groups(root: str, split: Optional[str] = None,
                 loader_path: Optional[str] = None,
                 **filters: object) -> Iterable[Tuple[object, list]]:
     """Yield valid/invalid evaluator groups from a schema-v3 release."""
-    from utils.physloc_dataset import open_dataset
+    from datasets.physloc import open_dataset
 
     requested = {key: value for key, value in filters.items()
                  if value is not None}
