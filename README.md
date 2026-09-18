@@ -143,7 +143,12 @@ PhysLoc releases are read with the canonical `physloc/loader.py` from the PhysLo
 python -m datasets.physloc --physloc_root ../physloc/out/review_L0_f37
 ```
 
-The evaluation code is organized by responsibility: `datasets/` owns LikePhys configuration/video discovery and the PhysLoc loader bridge; `benchmarks/` owns benchmark-specific scoring orchestration; `utils/physloc_*` contains localization metrics, reporting, and visualization; and `evaluator.py` owns only model setup, denoising PPE, CLI configuration, and run persistence.
+The evaluation code is organized by responsibility: `datasets/` is the only
+dataset-adapter package (LikePhys configuration/video discovery and the
+PhysLoc loader bridge); `benchmarks/` owns benchmark-specific scoring
+orchestration; `utils/` contains only shared PPE metrics, reporting,
+visualization, and generic helpers; and `evaluator.py` owns model setup,
+denoising PPE, CLI configuration, and run persistence.
 
 This evaluator intentionally requires schema v3. Passing a schema-v2 `clips/`/NPZ release produces an explicit error before model initialization.
 
