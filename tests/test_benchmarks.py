@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from benchmarks.common import compute_misrank_normalized
 from benchmarks.likephys import evaluate
-from benchmarks.physloc import resolve_root
+from benchmarks.physloc import _sample_difficulty, resolve_root
 
 
 class CommonBenchmarkTests(unittest.TestCase):
@@ -35,6 +35,12 @@ class CommonBenchmarkTests(unittest.TestCase):
 
 
 class DatasetAdapterTests(unittest.TestCase):
+    def test_difficulty_falls_back_to_canonical_scene_info(self):
+        legacy_loader_sample = SimpleNamespace(scene_info={
+            "difficulty_analysis": {"level": "hard"},
+        })
+        self.assertEqual(_sample_difficulty(legacy_loader_sample)["level"], "hard")
+
     def test_likephys_adapter_groups_sorted_mp4_files(self):
         calls = []
 

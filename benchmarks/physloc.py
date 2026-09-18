@@ -63,6 +63,24 @@ def _sample_matches(sample: object, filters: Dict[str, object]) -> bool:
                for name, value in filters.items())
 
 
+def _sample_difficulty(sample: object) -> object:
+    """Read difficulty from either current or older canonical loader samples.
+
+    Newer loaders expose ``Sample.difficulty`` directly.  Older schema-v3
+    loaders retain the same information in ``scene_info`` but omit the
+    convenience property, so this fallback preserves compatibility without
+    changing the dataset or its canonical loader.
+    """
+    direct = getattr(sample, "difficulty", None)
+    if direct is not None:
+        return direct
+    scene_info = getattr(sample, "scene_info", {}) or {}
+    if not isinstance(scene_info, dict):
+        return None
+    return (scene_info.get("difficulty_analysis")
+            or scene_info.get("difficulty"))
+
+
 def iter_groups(root: str, split: Optional[str] = None,
                 loader_path: Optional[str] = None,
                 **filters: object) -> Iterable[Tuple[object, list]]:
@@ -247,7 +265,7 @@ def evaluate(args: object, pipe: object, score_video: ScoreVideo
                     "severity": sample.severity_bin,
                     "complexity": sample.level,
                     "condition": normalize_condition(sample.condition),
-                    "difficulty": normalize_difficulty(sample.difficulty),
+                    "difficulty": normalize_difficulty(_sample_difficulty(sample)),
                 },
             }
             if "latent_shape" in log_info:
