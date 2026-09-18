@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from analysis.results import analyze_results, collect_records, summarize
+from benchmarks.analysis.results import analyze_results, collect_records, summarize
 
 
 class ResultAnalysisTests(unittest.TestCase):

@@ -10,7 +10,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 import numpy as np
 
-from benchmarks.common import compute_misrank_normalized
+from benchmarks.evaluators.common import compute_misrank_normalized
 
 
 MODEL_NAMES = {

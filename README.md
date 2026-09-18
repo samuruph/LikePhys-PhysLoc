@@ -140,7 +140,7 @@ Each PhysLoc result directory contains `analysis/data/` CSV files and `analysis/
 PhysLoc releases are read with the canonical `physloc/loader.py` from the PhysLoc repository rather than a duplicated loader. The default sibling checkout is `/home/ec2-user/code/physloc`; use `--physloc_loader` or `$PHYSLOC_LOADER` elsewhere. To validate the schema-v3 layout, `h5py` dependency, and pairs before spending GPU time:
 
 ```bash
-python -m datasets.physloc --physloc_root ../physloc/out/review_L0_f37
+python -m benchmarks.datasets.physloc --physloc_root ../physloc/out/review_L0_f37
 ```
 
 The evaluation code is organized by responsibility: `datasets/` is the only

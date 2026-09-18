@@ -4,9 +4,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from benchmarks.common import compute_misrank_normalized
-from benchmarks.likephys import evaluate
-from benchmarks.physloc import _sample_difficulty, resolve_root
+from benchmarks.evaluators.common import compute_misrank_normalized
+from benchmarks.evaluators.likephys import evaluate
+from benchmarks.evaluators.physloc import _sample_difficulty, resolve_root
 
 
 class CommonBenchmarkTests(unittest.TestCase):

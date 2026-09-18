@@ -1040,7 +1040,7 @@ if __name__ == "__main__":
 
     args = parse_args()
     if args.summarize_results:
-        from analysis.results import analyze_results
+        from benchmarks.analysis.results import analyze_results
 
         analyze_results(
             args.summary_results_dir or args.output_dir,

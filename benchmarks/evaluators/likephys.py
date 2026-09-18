@@ -6,7 +6,7 @@ from typing import Callable, Dict, Tuple
 
 from tqdm.auto import tqdm
 
-from datasets.likephys import DATASETS, PROMPTS, iter_video_groups
+from ..datasets.likephys import DATASETS, PROMPTS, iter_video_groups
 
 ScoreVideo = Callable[[object, str, object], Tuple[object, Dict[str, object]]]
 
