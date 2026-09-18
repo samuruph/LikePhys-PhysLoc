@@ -70,7 +70,7 @@ PhysLoc only (`--data physloc`):
 - `--physloc_family`, `--physloc_scenario`, `--physloc_level`, `--physloc_condition`, `--physloc_severity_bin`: only invalid clips matching these; each pair's valid clip is always kept as the reference
 - `--physloc_loader`: canonical loader from the PhysLoc checkout; defaults to `../physloc/physloc/loader.py` or `$PHYSLOC_LOADER`
 - `--scores`: repeatable or comma-separated PhysLoc metric groups: `base_ppe`, `temporal_ppe`, `spatial_ppe`, `spatiotemporal_ppe`, or `all` (default: `base_ppe`)
-- `--visualize`: write synchronized clip MP4s, clip summaries, and valid/invalid pair summaries using a shared PPE error scale
+- `--visualize`: write synchronized clip MP4s, clip summaries, and valid/invalid pair summaries using a shared denoising-error scale
 
 ### Sample Scripts
 

@@ -727,14 +727,15 @@ def evaluate_video(args, video_path, pipe, noise_aug_strength=0.02, num_videos_p
     return loss, log_info
 
 
-def evaluate_likephys(args, dataset_dir, pipe):
+def evaluate_likephys(args, dataset_dir, pipe, score_video=None):
     """Evaluate LikePhys using the shared video-scoring implementation."""
-    return _evaluate_likephys(args, dataset_dir, pipe, evaluate_video)
+    return _evaluate_likephys(args, dataset_dir, pipe,
+                              score_video or evaluate_video)
 
 
-def evaluate_physloc(args, pipe):
+def evaluate_physloc(args, pipe, score_video=None):
     """Evaluate PhysLoc using the shared video-scoring implementation."""
-    return _evaluate_physloc(args, pipe, evaluate_video)
+    return _evaluate_physloc(args, pipe, score_video or evaluate_video)
 
 
 def set_seed(seed):

@@ -296,7 +296,7 @@ def localization_metrics(error: np.ndarray, grids: Mapping[str, np.ndarray]
 
 def temporal_metrics(error: np.ndarray, sample, source_indices: Sequence[int]
                      ) -> Dict[str, object]:
-    """Per-frame PPE and temporal windows/AP at native latent resolution."""
+    """Per-frame denoising error and temporal windows/AP at native resolution."""
     trace = np.asarray(error, np.float64).mean(axis=(1, 2))
     timeline = sample.timeline
     T = len(trace)

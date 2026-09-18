@@ -17,7 +17,8 @@ from typing import Optional
 
 
 DEFAULT_LOADER = os.path.abspath(os.path.join(
-    os.path.dirname(__file__), "..", "..", "physloc", "physloc", "loader.py"))
+    os.path.dirname(__file__), "..", "..", "..", "physloc", "physloc",
+    "loader.py"))
 
 
 def resolve_loader_path(path: Optional[str] = None) -> str:

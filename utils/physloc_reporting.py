@@ -18,7 +18,7 @@ TAXONOMY_FIELDS = ("family", "severity", "complexity", "condition", "difficulty"
 
 def _pair_row(pair_uid: str, sample_uid: str, taxonomy: Dict[str, object],
               score: str, pair: Dict[str, object]) -> Dict[str, object]:
-    """Convert a valid/invalid PPE comparison to one tidy result row."""
+    """Convert a valid/invalid denoising-loss comparison to one row."""
     return {
         "pair_uid": pair_uid, "sample_uid": sample_uid,
         **{key: taxonomy.get(key) for key in TAXONOMY_FIELDS},
@@ -338,7 +338,7 @@ def _plot_category_heatmaps(summaries: Sequence[Dict[str, object]],
 
 def _plot_base_category_bars(summaries: Sequence[Dict[str, object]],
                              plot_dir: str) -> None:
-    """Plot base-PPE valid-relative gaps with confidence intervals."""
+    """Plot valid-relative denoising-loss gaps with confidence intervals."""
     plt = _pyplot()
     for dimension in ("severity", "complexity", "condition", "difficulty"):
         rows = [row for row in summaries
@@ -352,8 +352,8 @@ def _plot_base_category_bars(summaries: Sequence[Dict[str, object]],
         fig, ax = plt.subplots(figsize=(max(6, len(rows) * 1.1), 4))
         ax.bar(labels, means, yerr=errors, color="#4c78a8", capsize=4)
         ax.axhline(0, color="#333333", linewidth=.8)
-        ax.set(title="Base PPE gap by %s" % dimension,
-               ylabel="invalid PPE - valid PPE")
+        ax.set(title="Denoising-loss gap by %s" % dimension,
+               ylabel="invalid loss - valid loss")
         ax.tick_params(axis="x", rotation=30)
         ax.grid(axis="y", alpha=.25)
         fig.tight_layout()
@@ -394,7 +394,7 @@ def _plot_severity(rows: Sequence[Dict[str, object]],
         ax.axhline(0, color="#333333", linewidth=.8)
         ax.set_xticks(range(3), labels)
         ax.set(title="Severity trend: %s" % score,
-               ylabel="invalid PPE - valid PPE")
+               ylabel="invalid loss - valid loss")
         ax.grid(axis="y", alpha=.25)
         ax.legend()
         fig.tight_layout()

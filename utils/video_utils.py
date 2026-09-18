@@ -32,13 +32,11 @@ def save_video(frames, output_path, fps=30):
         fps: frames per second
     """
     writer = cv2.VideoWriter(
-        output_path,
-        cv2.VideoWriter_fourcc(*'avc1'),
-        fps,
+        output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps,
         (frames.shape[2], frames.shape[1])
     )
     if not writer.isOpened():
-        raise IOError("H.264 (avc1) encoder unavailable for %s" % output_path)
+        raise IOError("MPEG-4 (mp4v) encoder unavailable for %s" % output_path)
     
     for frame in frames:
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)

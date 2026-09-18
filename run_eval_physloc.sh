@@ -12,6 +12,7 @@ SEEDS=(42)
 # PhysLoc releases; results for each are tagged with its folder name
 read -r -a RELEASES <<< "${PHYSLOC_ROOTS:-../physloc/out/review_L0_f37}"
 MODELS=(animatediff zeroscope modelscope wan2.1-T2V-1.3b hunyuan_t2v ltx-0.9.5 animatediff_sdxl cogvideox mochi cogvideox-5b wan2.1-T2V-14b)
+MODELS=(wan2.1-T2V-1.3b)
 FLAGS=("--guidance_scale")
 SCORES="${PHYSLOC_SCORES:-base_ppe}"
 VIZ_FLAG=()

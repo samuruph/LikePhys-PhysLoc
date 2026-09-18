@@ -1,4 +1,4 @@
-"""Per-clip and per-pair visual evidence for localized PhysLoc PPE."""
+"""Per-clip and per-pair visual evidence for localized denoising error."""
 from __future__ import annotations
 
 import os
@@ -23,7 +23,7 @@ def _resize(frame: np.ndarray, width: int = 320) -> np.ndarray:
 
 
 def expand_error_grid(error: np.ndarray, sampled_frames: int) -> np.ndarray:
-    """Expand latent-frame PPE grids onto sampled RGB-frame bins."""
+    """Expand latent-frame error grids onto sampled RGB-frame bins."""
     value = np.asarray(error, np.float32)
     out = np.zeros((sampled_frames,) + value.shape[1:], np.float32)
     for t, frames in enumerate(temporal_bins(sampled_frames, len(value))):
@@ -57,7 +57,7 @@ def annotation_overlay(rgb: np.ndarray, active: Optional[np.ndarray] = None,
 
 def compose_frame(rgb: np.ndarray, error: np.ndarray, scale: float,
                   active=None, visible=None, expected=None, causal=None) -> np.ndarray:
-    """Compose RGB, annotation, PPE heatmap, and overlay panels."""
+    """Compose RGB, annotation, denoising-error heatmap, and overlay panels."""
     rgb = _resize(rgb)
     h, w = rgb.shape[:2]
     active = None if active is None else cv2.resize(
@@ -77,7 +77,7 @@ def compose_frame(rgb: np.ndarray, error: np.ndarray, scale: float,
     overlay = (0.45 * rgb + 0.55 * heat).astype(np.uint8)
     panels = [(np.ascontiguousarray(rgb), "RGB"),
               (np.ascontiguousarray(annotation), "ANNOTATIONS"),
-              (heat, "PPE ERROR"), (overlay, "PPE OVERLAY")]
+              (heat, "DENOISING ERROR"), (overlay, "ERROR OVERLAY")]
     for panel, title in panels:
         cv2.rectangle(panel, (0, 0), (w, 25), (15, 15, 20), -1)
         cv2.putText(panel, title, (7, 18), cv2.FONT_HERSHEY_SIMPLEX,
@@ -115,10 +115,11 @@ def render_clip(sample, error: np.ndarray, indices: Sequence[int], scale: float,
                   if annotations is not None else {})
         frames.append(compose_frame(rgb, errors[t], scale, **kwargs))
     height, width = frames[0].shape[:2]
-    writer = cv2.VideoWriter(output_mp4, cv2.VideoWriter_fourcc(*"avc1"),
-                             max(1.0, float(sample.fps)), (width, height))
+    writer = cv2.VideoWriter(
+        output_mp4, cv2.VideoWriter_fourcc(*"mp4v"),
+        max(1.0, float(sample.fps)), (width, height))
     if not writer.isOpened():
-        raise IOError("H.264 (avc1) encoder unavailable for %s" % output_mp4)
+        raise IOError("MPEG-4 (mp4v) encoder unavailable for %s" % output_mp4)
     for frame in frames:
         writer.write(frame[..., ::-1])
     writer.release()
@@ -136,7 +137,7 @@ def _pyplot():
 
 
 def _clip_summary(sample, error, indices, scale, output_png, annotation_sample):
-    """Write representative frames and synchronized PPE/severity traces."""
+    """Write representative frames and synchronized error/severity traces."""
     plt = _pyplot()
     frames = np.asarray(sample.video)[np.clip(np.asarray(indices, int), 0,
                                               sample.num_frames - 1)]
@@ -152,12 +153,13 @@ def _clip_summary(sample, error, indices, scale, output_png, annotation_sample):
         error_ax.imshow(cv2.resize(expanded[t],
                                    (frames[t].shape[1], frames[t].shape[0])),
                         cmap="inferno", alpha=.65, vmin=0, vmax=scale)
-        error_ax.set_title("PPE magnitude")
+        error_ax.set_title("Mean squared denoising error")
         rgb_ax.axis("off")
         error_ax.axis("off")
     trace_ax = fig.add_subplot(grid[2, :])
     trace = expanded.mean(axis=(1, 2))
-    trace_ax.plot(np.arange(len(trace)), trace, color="#d84a4a", label="PPE")
+    trace_ax.plot(np.arange(len(trace)), trace, color="#d84a4a",
+                  label="mean squared denoising error")
     if annotation_sample is not None:
         annotations = _raw_annotations(annotation_sample, indices)
         severity = annotations["severity"].reshape(len(trace), -1).max(axis=1)
@@ -172,7 +174,8 @@ def _clip_summary(sample, error, indices, scale, output_png, annotation_sample):
             trace_ax.fill_between(np.arange(len(trace)), 0, 1, where=values,
                                   transform=trace_ax.get_xaxis_transform(),
                                   color=colour, alpha=.13, label=name)
-    trace_ax.set(xlabel="sampled RGB frame", ylabel="PPE")
+    trace_ax.set(xlabel="sampled RGB frame",
+                 ylabel="mean squared denoising error")
     trace_ax.grid(alpha=.25)
     trace_ax.legend(loc="upper left", ncol=3)
     fig.suptitle(str(sample.uid))
@@ -183,7 +186,7 @@ def _clip_summary(sample, error, indices, scale, output_png, annotation_sample):
 
 def render_pair_summary(valid_runtime: Dict, invalid_runtime: Dict,
                         output_png: str) -> None:
-    """Plot valid and invalid temporal PPE traces on shared axes."""
+    """Plot valid and invalid denoising-error traces on shared axes."""
     plt = _pyplot()
     sample = invalid_runtime["sample"]
     indices = invalid_runtime["indices"]
@@ -191,8 +194,10 @@ def render_pair_summary(valid_runtime: Dict, invalid_runtime: Dict,
     invalid = temporal_metrics(invalid_runtime["grid"], sample, indices)
     x = np.arange(len(invalid["rgb_frame_ppe"]))
     fig, ax = plt.subplots(figsize=(11, 4.5))
-    ax.plot(x, valid["rgb_frame_ppe"], label="valid twin", color="#39a96b")
-    ax.plot(x, invalid["rgb_frame_ppe"], label="invalid", color="#d84a4a")
+    ax.plot(x, valid["rgb_frame_ppe"], label="valid denoising error",
+            color="#39a96b")
+    ax.plot(x, invalid["rgb_frame_ppe"], label="invalid denoising error",
+            color="#d84a4a")
     clocks = invalid["latent_clocks"]
     for label, colour in (("active", "#ff7777"), ("consequence", "#7698d8")):
         expanded = np.zeros(len(x), bool)
@@ -200,8 +205,9 @@ def render_pair_summary(valid_runtime: Dict, invalid_runtime: Dict,
             expanded[frames] = bool(clocks[label][t])
         ax.fill_between(x, 0, 1, where=expanded, transform=ax.get_xaxis_transform(),
                         color=colour, alpha=.15, label=label)
-    ax.set(title="Pair PPE trace: %s" % sample.uid,
-           xlabel="sampled RGB frame", ylabel="PPE")
+    ax.set(title="Pair denoising-error trace: %s" % sample.uid,
+           xlabel="sampled RGB frame",
+           ylabel="mean squared denoising error")
     ax.grid(alpha=.25)
     ax.legend(ncol=4)
     fig.tight_layout()
