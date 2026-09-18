@@ -88,6 +88,17 @@ def reference_mask(valid_segmentation: np.ndarray, ids: Sequence[int]) -> np.nda
                    np.asarray(list(ids), dtype=valid_segmentation.dtype))
 
 
+def shadow_reference_mask(shadow_strength: np.ndarray,
+                          shadow_source_id: np.ndarray,
+                          ids: Sequence[int],
+                          threshold: float = 1.0 / 255.0) -> np.ndarray:
+    """Return the lawful cast-shadow footprint for public caster IDs."""
+    strength = np.asarray(shadow_strength, np.float32)
+    source = np.asarray(shadow_source_id)
+    return (strength > float(threshold)) & np.isin(
+        source, np.asarray(list(ids), dtype=source.dtype))
+
+
 def sample_timeline(objects: Dict[str, np.ndarray], num_frames: int) -> Dict[str, np.ndarray]:
     n = len(objects.get("ids", ()))
     is_violator = np.asarray(objects.get("is_violator", np.ones(n, bool)), bool)
@@ -270,6 +281,10 @@ class Sample:
     condition = property(lambda self: self.scene_info.get("condition"))
     level = property(lambda self: self.scene_info.get("level"))
     severity_bin = property(lambda self: self.scene_info.get("severity"))
+    difficulty = property(lambda self: (
+        (self.scene_info.get("difficulty_analysis") or {}).get("level")
+        if isinstance(self.scene_info.get("difficulty_analysis"), dict)
+        else self.scene_info.get("difficulty")))
     twin = property(lambda self: self._twin)
 
     @property
@@ -395,8 +410,14 @@ class Sample:
         if self.is_valid or self.twin is None:
             return np.zeros(self.segmentations.shape, bool)
         table = self.object_table
-        return reference_mask(self.twin.segmentations,
-                              table["ids"][np.asarray(table["is_violator"], bool)])
+        ids = table["ids"][np.asarray(table["is_violator"], bool)]
+        if np.any(self.violation_component == 2):
+            strength = self.twin.observations.get("shadow_strength")
+            source = self.twin.observations.get("shadow_source_id")
+            if strength is not None and source is not None:
+                return shadow_reference_mask(strength, source, ids)
+            return np.zeros(self.segmentations.shape, bool)
+        return reference_mask(self.twin.segmentations, ids)
 
     timeline = property(lambda self: sample_timeline(self.object_table, self.num_frames))
     energy = property(lambda self: self.scene_energy.as_dict())
