@@ -928,6 +928,9 @@ def evaluate_physloc(args, pipe):
                 if invalid_runtime is None:
                     continue
                 _attach_physloc_pair_metrics(args, valid_runtime, invalid_runtime)
+        if args.visualize:
+            from utils.physloc_visualization import render_pair_artifacts
+            render_pair_artifacts(args.run_dir, pair, runtime)
 
         if subgroup_results:
             results[pair.pair_uid] = subgroup_results
@@ -1389,6 +1392,7 @@ if __name__ == "__main__":
 
     # Determine where to save results
     output_file = f"./{args.output_dir}/{exp_name}/{data_name}/results_{args.model}.json"
+    args.run_dir = os.path.dirname(output_file)
 
     # Skip if results already exist and appear complete
     if os.path.exists(output_file):
