@@ -81,6 +81,61 @@ def _label_panel(panel: np.ndarray, title: str) -> np.ndarray:
     return panel
 
 
+def _text_panel(title: str, lines: Sequence[str], width: int,
+                height: int) -> np.ndarray:
+    """Create a dark panel containing compact per-frame metadata."""
+    panel = np.zeros((height, width, 3), np.uint8)
+    panel[:] = (32, 32, 38)
+    panel = _label_panel(panel, title)
+    for index, line in enumerate(lines):
+        cv2.putText(panel, str(line), (10, 52 + 24 * index),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (240, 240, 240),
+                    1, cv2.LINE_AA)
+    return panel
+
+
+def _legend_panel(title: str, width: int, height: int, scale: float,
+                  signed: bool = False) -> np.ndarray:
+    """Create a legend matching one of the visualization heatmaps."""
+    panel = np.zeros((height, width, 3), np.uint8)
+    panel[:] = (32, 32, 38)
+    panel = _label_panel(panel, title)
+    bar_x0, bar_x1 = 18, width - 18
+    bar_y0, bar_y1 = 55, min(height - 48, 105)
+    values = np.linspace(-1 if signed else 0, 1,
+                         max(2, bar_x1 - bar_x0), dtype=np.float32)
+    values = values[None, :]
+    if signed:
+        indexed = ((values + 1.0) * 127.5).astype(np.uint8)
+        colors = cv2.applyColorMap(indexed, cv2.COLORMAP_JET)[0, :, ::-1]
+        labels = ["valid higher", "0", "invalid higher"]
+        label_values = [-float(scale), 0.0, float(scale)]
+    else:
+        indexed = (np.clip(values, 0, 1) * 255).astype(np.uint8)
+        colors = cv2.applyColorMap(indexed, cv2.COLORMAP_INFERNO)[0, :, ::-1]
+        labels = ["low", "high"]
+        label_values = [0.0, float(scale)]
+    bar = np.repeat(colors[None, :, :], bar_y1 - bar_y0, axis=0)
+    panel[bar_y0:bar_y1, bar_x0:bar_x1] = bar
+    if signed:
+        positions = [bar_x0, (bar_x0 + bar_x1) // 2, bar_x1 - 1]
+    else:
+        positions = [bar_x0, bar_x1 - 1]
+    for position, label, value in zip(positions, labels, label_values):
+        cv2.line(panel, (position, bar_y1), (position, bar_y1 + 7),
+                 (240, 240, 240), 1)
+        text = "%s\n%.4f" % (label, value)
+        lines = text.split("\n")
+        text_x = max(2, min(width - 75, position - 24))
+        cv2.putText(panel, lines[0], (text_x, bar_y1 + 23),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.34, (240, 240, 240),
+                    1, cv2.LINE_AA)
+        cv2.putText(panel, lines[1], (text_x, bar_y1 + 39),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.34, (240, 240, 240),
+                    1, cv2.LINE_AA)
+    return panel
+
+
 def _resolve_ffmpeg() -> str:
     """Find ffmpeg even when the evaluator was launched with a short PATH."""
     candidates = [
@@ -145,25 +200,41 @@ def compose_pair_frame(valid_rgb: np.ndarray, invalid_rgb: np.ndarray,
     valid_heat = _heatmap(valid_error, width, height, raw_scale)
     difference_heat = _heatmap(
         difference, width, height, difference_scale, signed=True)
+    valid_overlay = (0.45 * valid_rgb + 0.55 * valid_heat).astype(np.uint8)
     invalid_overlay = (0.45 * invalid_rgb + 0.55 * invalid_heat).astype(np.uint8)
     difference_overlay = (0.45 * invalid_rgb + 0.55 * difference_heat).astype(np.uint8)
-    panels = [
-        _label_panel(valid_rgb, "VALID RGB"),
-        _label_panel(invalid_rgb, "INVALID RGB"),
-        _label_panel(annotation, "ANNOTATIONS"),
-        _label_panel(invalid_heat, "INVALID ERROR"),
-        _label_panel(valid_heat, "VALID ERROR"),
-        _label_panel(difference_heat, "DELTA: INVALID - VALID"),
-        _label_panel(invalid_overlay, "INVALID OVERLAY"),
-        _label_panel(difference_overlay, "DELTA OVERLAY"),
+    metrics = _text_panel(
+        "FRAME METRICS",
+        ["frame %d" % frame_index,
+         "valid PPE %.4f" % valid_loss,
+         "invalid PPE %.4f" % invalid_loss,
+         "PPE delta %.4f" % (invalid_loss - valid_loss)],
+        width, height)
+    absolute_legend = _legend_panel(
+        "ABSOLUTE ERROR", width, height, raw_scale)
+    delta_legend = _legend_panel(
+        "SIGNED DELTA", width, height, difference_scale, signed=True)
+    rows = [
+        [
+            _label_panel(valid_rgb, "VALID RGB"),
+            _label_panel(valid_heat, "VALID ERROR"),
+            _label_panel(valid_overlay, "VALID OVERLAY"),
+            metrics,
+        ],
+        [
+            _label_panel(invalid_rgb, "INVALID RGB"),
+            _label_panel(annotation, "ANNOTATIONS"),
+            _label_panel(invalid_heat, "INVALID ERROR"),
+            _label_panel(invalid_overlay, "INVALID OVERLAY"),
+        ],
+        [
+            _label_panel(difference_heat, "DELTA: INVALID - VALID"),
+            _label_panel(difference_overlay, "DELTA OVERLAY"),
+            absolute_legend,
+            delta_legend,
+        ],
     ]
-    canvas = np.concatenate(panels, axis=1)
-    cv2.putText(canvas, "frame %d | valid PPE %.4f | invalid PPE %.4f | delta %.4f"
-                % (frame_index, valid_loss, invalid_loss,
-                   invalid_loss - valid_loss),
-                (7, height - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
-                (255, 255, 255), 1, cv2.LINE_AA)
-    return canvas
+    return np.vstack([np.hstack(row) for row in rows])
 
 
 def _raw_annotations(sample, indices: Sequence[int]):
@@ -195,7 +266,14 @@ def render_clip(sample, error: np.ndarray, indices: Sequence[int], scale: float,
                    ("active", "visible", "expected", "causal")}
                   if annotations is not None else {})
         frames.append(compose_frame(rgb, errors[t], scale, **kwargs))
-    height, width = frames[0].shape[:2]
+    video_frames = np.stack(frames)
+    pad_h = (-video_frames.shape[1]) % 16
+    pad_w = (-video_frames.shape[2]) % 16
+    if pad_h or pad_w:
+        video_frames = np.pad(
+            video_frames, ((0, 0), (0, pad_h), (0, pad_w), (0, 0)),
+            mode="edge")
+    height, width = video_frames.shape[1:3]
     ffmpeg = _resolve_ffmpeg()
     command = [
         ffmpeg, "-y", "-loglevel", "error",
@@ -207,7 +285,7 @@ def render_clip(sample, error: np.ndarray, indices: Sequence[int], scale: float,
     ]
     process = subprocess.Popen(command, stdin=subprocess.PIPE)
     try:
-        for frame in frames:
+        for frame in video_frames:
             process.stdin.write(np.ascontiguousarray(frame[..., ::-1]).tobytes())
         process.stdin.close()
         if process.wait() != 0:
@@ -246,7 +324,14 @@ def render_pair_clip(valid_runtime: Dict, invalid_runtime: Dict,
             valid_errors[t], differences[t], raw_scale, difference_scale,
             t, invalid_loss, valid_loss, **kwargs))
     os.makedirs(os.path.dirname(output_mp4), exist_ok=True)
-    height, width = frames[0].shape[:2]
+    video_frames = np.stack(frames)
+    pad_h = (-video_frames.shape[1]) % 16
+    pad_w = (-video_frames.shape[2]) % 16
+    if pad_h or pad_w:
+        video_frames = np.pad(
+            video_frames, ((0, 0), (0, pad_h), (0, pad_w), (0, 0)),
+            mode="edge")
+    height, width = video_frames.shape[1:3]
     ffmpeg = _resolve_ffmpeg()
     command = [
         ffmpeg, "-y", "-loglevel", "error",
@@ -258,7 +343,7 @@ def render_pair_clip(valid_runtime: Dict, invalid_runtime: Dict,
     ]
     process = subprocess.Popen(command, stdin=subprocess.PIPE)
     try:
-        for frame in frames:
+        for frame in video_frames:
             process.stdin.write(np.ascontiguousarray(frame[..., ::-1]).tobytes())
         process.stdin.close()
         if process.wait() != 0:
