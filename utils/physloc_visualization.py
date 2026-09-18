@@ -115,10 +115,10 @@ def render_clip(sample, error: np.ndarray, indices: Sequence[int], scale: float,
                   if annotations is not None else {})
         frames.append(compose_frame(rgb, errors[t], scale, **kwargs))
     height, width = frames[0].shape[:2]
-    writer = cv2.VideoWriter(output_mp4, cv2.VideoWriter_fourcc(*"mp4v"),
+    writer = cv2.VideoWriter(output_mp4, cv2.VideoWriter_fourcc(*"avc1"),
                              max(1.0, float(sample.fps)), (width, height))
     if not writer.isOpened():
-        raise IOError("could not open video writer for %s" % output_mp4)
+        raise IOError("H.264 (avc1) encoder unavailable for %s" % output_mp4)
     for frame in frames:
         writer.write(frame[..., ::-1])
     writer.release()
