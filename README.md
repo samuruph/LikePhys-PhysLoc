@@ -263,8 +263,21 @@ python -m benchmarks.analysis.results \
 ```
 
 The lightweight module writes `misrank_by_variation.csv`,
-`misrank_summary.csv`, and `misrank_summary.png`. The evaluator's PhysLoc
-analysis writes the metric CSVs and category/severity plots described above.
+`misrank_summary.csv`, `misrank_summary.png` (overall model comparison), and
+`misrank_by_category.png` (one grouped histogram containing overall plus all
+datasets or physics categories). The evaluator's PhysLoc analysis writes the metric CSVs
+and category/severity plots described above.
+
+Run the analysis command inside the Conda environment containing the project
+dependencies (`numpy` and `matplotlib`). For example, on the reference
+machine:
+
+```bash
+conda activate physloc
+python -m benchmarks.analysis.results \
+  --results-dir results/evaluation_t10_uniform_42_cfg_final_likephys \
+  --output-dir results/evaluation_t10_uniform_42_cfg_final_likephys/analysis
+```
 There is currently no automatic LaTeX writer; the CSV files are the stable
 tabular interface for generating LaTeX tables externally. Keep separate
 `--output-dir` values when comparing experiments so their records are not

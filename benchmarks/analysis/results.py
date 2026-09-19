@@ -136,6 +136,57 @@ def plot_summary(path: Path, rows: Sequence[Mapping[str, object]]) -> bool:
     return True
 
 
+def plot_category_summary(path: Path,
+                          rows: Sequence[Mapping[str, object]]) -> bool:
+    """Write one grouped histogram with overall and all categories."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return False
+    category_rows = [row for row in rows if row["dataset"] != "overall"]
+    if not category_rows:
+        return False
+    models = sorted({str(row["model"]) for row in category_rows})
+    datasets = sorted({str(row["dataset"]) for row in category_rows})
+    categories = ["overall"] + datasets
+    figure, axis = plt.subplots(
+        figsize=(max(11, 0.85 * len(categories) + 4), 6.5))
+    colors = plt.get_cmap("tab10")(np.linspace(0, 1, max(1, len(models))))
+    positions = np.arange(len(categories), dtype=np.float64)
+    bar_width = min(.8 / max(1, len(models)), .22)
+    for model_index, model in enumerate(models):
+        values = []
+        for category in categories:
+            selected = [row for row in rows
+                        if row["dataset"] == category and
+                        str(row["model"]) == model]
+            values.append(100.0 * float(selected[0]["misrank_ratio"])
+                          if selected else np.nan)
+        offset = (model_index - (len(models) - 1) / 2.0) * bar_width
+        bars = axis.bar(positions + offset, values, width=bar_width,
+                        label=MODEL_NAMES.get(model, model),
+                        color=colors[model_index])
+        for bar, value in zip(bars, values):
+            if np.isfinite(value):
+                axis.text(bar.get_x() + bar.get_width() / 2,
+                          min(98, value + 1.5), "%.1f" % value,
+                          ha="center", va="bottom", fontsize=8,
+                          rotation=90 if len(categories) > 8 else 0)
+    axis.set_ylim(0, 100)
+    axis.set_xticks(positions, categories, rotation=40, ha="right")
+    axis.set_ylabel("Mis-rank (%)")
+    axis.set_xlabel("Physics category / dataset")
+    axis.set_title("PPE mis-rank: overall and per category")
+    axis.grid(axis="y", alpha=.25)
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(path, dpi=180)
+    plt.close(figure)
+    return True
+
+
 def analyze_results(results_dir: str | Path,
                     output_dir: str | Path | None = None,
                     weighting: str = "variation") -> List[Dict[str, object]]:
@@ -165,11 +216,15 @@ def analyze_results(results_dir: str | Path,
     write_csv(destination / "misrank_by_variation.csv", records)
     write_csv(destination / "misrank_summary.csv", summary)
     plotted = plot_summary(destination / "misrank_summary.png", summary)
+    category_plotted = plot_category_summary(
+        destination / "misrank_by_category.png", summary)
     print("Read %d variation records from %d dataset(s)." %
           (len(records), len({row["dataset"] for row in records})))
     print("Wrote %s" % (destination / "misrank_summary.csv"))
     if plotted:
         print("Wrote %s" % (destination / "misrank_summary.png"))
+    if category_plotted:
+        print("Wrote %s" % (destination / "misrank_by_category.png"))
     for row in sorted((item for item in summary if item["dataset"] == "overall"),
                       key=lambda item: item["misrank_ratio"]):
         print("%-24s %.2f%%" %
@@ -189,3 +244,7 @@ def main(default_results_dir: Optional[str] = None) -> None:
                         default="variation")
     args = parser.parse_args()
     analyze_results(args.results_dir, args.output_dir, args.weighting)
+
+
+if __name__ == "__main__":
+    main()
