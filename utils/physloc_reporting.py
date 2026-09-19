@@ -15,6 +15,11 @@ from .physloc_metrics import SEVERITY_ORDER
 
 TAXONOMY_FIELDS = ("family", "severity", "complexity", "condition", "difficulty")
 
+# Fixed display order (not alphabetical) matching utils/physloc_metrics.py.
+SPATIAL_REGIONS = ("violating_object", "active_violating_object", "active_violation",
+                   "active_violation_visible", "expected_object", "causal_consequence")
+TEMPORAL_WINDOWS = ("before", "active_visible", "active_hidden", "consequence")
+
 
 def _pair_row(pair_uid: str, sample_uid: str, taxonomy: Dict[str, object],
               score: str, pair: Dict[str, object]) -> Dict[str, object]:
@@ -130,6 +135,27 @@ def category_summaries(rows: Sequence[Dict[str, object]]) -> List[Dict[str, obje
                 "detection_rate": (float(np.mean(detected)) if detected else None),
                 "misrank_rate": (float(1.0 - np.mean(detected)) if detected else None),
             })
+    return out
+
+
+def overall_summaries(rows: Sequence[Dict[str, object]]) -> List[Dict[str, object]]:
+    """Aggregate every available score across the whole run, ignoring taxonomy."""
+    grouped = defaultdict(list)
+    for row in rows:
+        if row.get("available") and row.get("value") is not None:
+            grouped[(row["score"], row["kind"])].append(row)
+    out = []
+    for (score, kind), items in sorted(grouped.items(), key=lambda x: str(x[0])):
+        values = [float(row["value"]) for row in items]
+        gaps = [float(row["ppe_gap"]) for row in items
+                if row.get("ppe_gap") is not None]
+        detected = [bool(row["detected"]) for row in items
+                    if row.get("detected") is not None]
+        out.append({
+            "score": score, "kind": kind,
+            "value": _summary(values), "ppe_gap": _summary(gaps),
+            "detection_rate": (float(np.mean(detected)) if detected else None),
+        })
     return out
 
 
@@ -306,137 +332,231 @@ def _pyplot():
     return plt
 
 
-def _plot_category_heatmaps(summaries: Sequence[Dict[str, object]],
-                            plot_dir: str) -> None:
-    """Plot score-by-category mean heatmaps."""
-    plt = _pyplot()
-    for dimension in ("severity", "complexity", "condition", "difficulty"):
-        subset = [row for row in summaries if row["dimension"] == dimension]
-        for kind in sorted({row["kind"] for row in subset}):
-            rows = [row for row in subset if row["kind"] == kind]
-            scores = sorted({row["score"] for row in rows})
-            categories = sorted({str(row["category"]) for row in rows})
-            if not scores or not categories:
-                continue
-            matrix = np.full((len(scores), len(categories)), np.nan)
-            for row in rows:
-                if row["value"]["mean"] is not None:
-                    matrix[scores.index(row["score"]),
-                           categories.index(str(row["category"]))] = row["value"]["mean"]
-            fig, ax = plt.subplots(figsize=(max(6, 1.2 * len(categories)),
-                                            max(3, .42 * len(scores) + 2)))
-            image = ax.imshow(np.ma.masked_invalid(matrix), aspect="auto", cmap="viridis")
-            ax.set_xticks(range(len(categories)), categories, rotation=35, ha="right")
-            ax.set_yticks(range(len(scores)), scores)
-            ax.set_title("%s by %s" % (kind.replace("_", " ").title(), dimension))
-            fig.colorbar(image, ax=ax, label="mean score")
-            fig.tight_layout()
-            fig.savefig(os.path.join(plot_dir, "heatmap_%s_%s.png"
-                                     % (_safe(dimension), _safe(kind))), dpi=170)
-            plt.close(fig)
-
-
-def _plot_base_category_bars(summaries: Sequence[Dict[str, object]],
+def _plot_category_breakdown(summaries: Sequence[Dict[str, object]],
                              plot_dir: str) -> None:
-    """Plot valid-relative denoising-loss gaps with confidence intervals."""
-    plt = _pyplot()
+    """Plot the base denoising-error gap by taxonomy category, one figure."""
+    panels = []
     for dimension in ("severity", "complexity", "condition", "difficulty"):
         rows = [row for row in summaries
                 if row["dimension"] == dimension and row["score"] == "base_ppe"
                 and row["ppe_gap"]["mean"] is not None]
-        if not rows:
-            continue
+        if len(rows) >= 2:
+            panels.append((dimension, rows))
+    if not panels:
+        return
+    plt = _pyplot()
+    ncols = min(2, len(panels))
+    nrows = math.ceil(len(panels) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6.2 * ncols, 4 * nrows),
+                             squeeze=False)
+    for index, (dimension, rows) in enumerate(panels):
+        ax = axes[index // ncols][index % ncols]
         labels = [str(row["category"]) for row in rows]
         means = [row["ppe_gap"]["mean"] for row in rows]
-        errors = [row["ppe_gap"]["ci95"] for row in rows]
-        fig, ax = plt.subplots(figsize=(max(6, len(rows) * 1.1), 4))
+        errors = [row["ppe_gap"]["ci95"] or 0 for row in rows]
         ax.bar(labels, means, yerr=errors, color="#4c78a8", capsize=4)
         ax.axhline(0, color="#333333", linewidth=.8)
-        ax.set(title="Denoising-loss gap by %s" % dimension,
-               ylabel="invalid loss - valid loss")
+        ax.set(title="by %s" % dimension, ylabel="invalid - valid denoising error")
         ax.tick_params(axis="x", rotation=30)
         ax.grid(axis="y", alpha=.25)
-        fig.tight_layout()
-        fig.savefig(os.path.join(plot_dir, "base_ppe_gap_%s.png" % _safe(dimension)),
-                    dpi=170)
-        plt.close(fig)
+    for index in range(len(panels), nrows * ncols):
+        axes[index // ncols][index % ncols].axis("off")
+    fig.suptitle("Denoising-error gap by category")
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, "category_breakdown.png"), dpi=170)
+    plt.close(fig)
 
 
-def _plot_severity(rows: Sequence[Dict[str, object]],
-                   severity: Dict[str, object], plot_dir: str) -> None:
-    """Plot severity trends and matched-ladder ordering accuracy."""
+def _plot_spatial_localization(overall: Sequence[Dict[str, object]],
+                               plot_dir: str) -> None:
+    """Plot region ranking (AP) and denoising-error gap by spatial region."""
+    ap_by_region = {row["score"][:-3]: row for row in overall
+                    if row["kind"] == "spatiotemporal_localization"
+                    and row["score"].endswith("_ap")
+                    and row["value"]["mean"] is not None}
+    gap_by_region = {row["score"].split(":", 1)[1]: row for row in overall
+                     if row["kind"] == "pair_ppe"
+                     and str(row["score"]).startswith("spatial:")
+                     and row["ppe_gap"]["mean"] is not None}
+    ap_regions = [name for name in SPATIAL_REGIONS if name in ap_by_region]
+    gap_regions = [name for name in SPATIAL_REGIONS if name in gap_by_region]
+    if not ap_regions and not gap_regions:
+        return
     plt = _pyplot()
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.6))
+    if ap_regions:
+        means = [ap_by_region[name]["value"]["mean"] for name in ap_regions]
+        errors = [ap_by_region[name]["value"]["ci95"] or 0 for name in ap_regions]
+        axes[0].bar(ap_regions, means, yerr=errors, color="#59a14f", capsize=4)
+        axes[0].axhline(0.5, color="#333333", linewidth=.8, linestyle="--",
+                        label="chance")
+        axes[0].set(title="Spatial ranking (AP)", ylabel="average precision",
+                   ylim=(0, 1))
+        axes[0].tick_params(axis="x", rotation=30)
+        axes[0].grid(axis="y", alpha=.25)
+        axes[0].legend()
+    else:
+        axes[0].axis("off")
+    if gap_regions:
+        means = [gap_by_region[name]["ppe_gap"]["mean"] for name in gap_regions]
+        errors = [gap_by_region[name]["ppe_gap"]["ci95"] or 0 for name in gap_regions]
+        axes[1].bar(gap_regions, means, yerr=errors, color="#4c78a8", capsize=4)
+        axes[1].axhline(0, color="#333333", linewidth=.8)
+        axes[1].set(title="Denoising-error gap by region",
+                   ylabel="invalid - valid denoising error")
+        axes[1].tick_params(axis="x", rotation=30)
+        axes[1].grid(axis="y", alpha=.25)
+    else:
+        axes[1].axis("off")
+    fig.suptitle("Spatial localization")
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, "spatial_localization.png"), dpi=170)
+    plt.close(fig)
+
+
+def _plot_temporal_localization(overall: Sequence[Dict[str, object]],
+                                plot_dir: str) -> None:
+    """Plot denoising-error gap by temporal window and event/consequence AP."""
+    gap_by_window = {row["score"].split(":", 1)[1]: row for row in overall
+                     if row["kind"] == "pair_ppe"
+                     and str(row["score"]).startswith("temporal:")
+                     and row["ppe_gap"]["mean"] is not None}
+    ap_names = ("temporal_event_ap", "temporal_consequence_ap")
+    ap_by_name = {row["score"]: row for row in overall
+                 if row["kind"] == "temporal_localization"
+                 and row["score"] in ap_names
+                 and row["value"]["mean"] is not None}
+    windows = [name for name in TEMPORAL_WINDOWS if name in gap_by_window]
+    if not windows and not ap_by_name:
+        return
+    plt = _pyplot()
+    fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.6))
+    if windows:
+        means = [gap_by_window[name]["ppe_gap"]["mean"] for name in windows]
+        errors = [gap_by_window[name]["ppe_gap"]["ci95"] or 0 for name in windows]
+        axes[0].bar(windows, means, yerr=errors, color="#4c78a8", capsize=4)
+        axes[0].axhline(0, color="#333333", linewidth=.8)
+        axes[0].set(title="Denoising-error gap by window",
+                   ylabel="invalid - valid denoising error")
+        axes[0].tick_params(axis="x", rotation=20)
+        axes[0].grid(axis="y", alpha=.25)
+    else:
+        axes[0].axis("off")
+    if ap_by_name:
+        labels = [name for name in ap_names if name in ap_by_name]
+        means = [ap_by_name[name]["value"]["mean"] for name in labels]
+        errors = [ap_by_name[name]["value"]["ci95"] or 0 for name in labels]
+        ticks = [name.replace("temporal_", "").replace("_ap", "") for name in labels]
+        axes[1].bar(ticks, means, yerr=errors, color="#59a14f", capsize=4)
+        axes[1].axhline(0.5, color="#333333", linewidth=.8, linestyle="--",
+                        label="chance")
+        axes[1].set(title="Temporal ranking (AP)", ylabel="average precision",
+                   ylim=(0, 1))
+        axes[1].grid(axis="y", alpha=.25)
+        axes[1].legend()
+    else:
+        axes[1].axis("off")
+    fig.suptitle("Temporal localization")
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, "temporal_localization.png"), dpi=170)
+    plt.close(fig)
+
+
+def _plot_severity_trends(rows: Sequence[Dict[str, object]],
+                          severity: Dict[str, object], plot_dir: str) -> None:
+    """Plot weak/medium/strong denoising-error-gap trends for headline scores."""
+    if len({row.get("severity") for row in rows
+           if row.get("severity") in SEVERITY_ORDER}) < 2:
+        return
+    headline_scores = ("base_ppe", "spatial:violating_object",
+                       "spatial:causal_consequence", "temporal:active_visible",
+                       "temporal:consequence")
     pair_rows = [row for row in rows if row["kind"] == "pair_ppe"
-                 and row.get("severity") in SEVERITY_ORDER
-                 and not str(row["score"]).startswith("spatial_severity_weighted:")
-                 and row.get("ppe_gap") is not None]
-    for score in sorted({row["score"] for row in pair_rows}):
+                and row.get("severity") in SEVERITY_ORDER
+                and row.get("ppe_gap") is not None]
+    present = [score for score in headline_scores
+              if any(row["score"] == score for row in pair_rows)]
+    if not present:
+        return
+    plt = _pyplot()
+    labels = ["weak", "medium", "strong"]
+    ncols = min(3, len(present))
+    nrows = math.ceil(len(present) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.3 * ncols, 4 * nrows),
+                             squeeze=False)
+    for index, score in enumerate(present):
+        ax = axes[index // ncols][index % ncols]
         selected = [row for row in pair_rows if row["score"] == score]
-        labels = ["weak", "medium", "strong"]
         summaries = [_summary([float(row["ppe_gap"]) for row in selected
                                if row["severity"] == label]) for label in labels]
-        if not any(item["count"] for item in summaries):
-            continue
-        fig, ax = plt.subplots(figsize=(6, 4.5))
-        groups = [item for item in severity["matched_groups"] if item["score"] == score]
+        groups = [group for group in severity["matched_groups"]
+                 if group["score"] == score]
         for group in groups:
             xs, ys = [], []
-            for index, label in enumerate(labels):
+            for i, label in enumerate(labels):
                 if label in group["gaps"]:
-                    xs.append(index)
+                    xs.append(i)
                     ys.append(group["gaps"][label])
             ax.plot(xs, ys, color="#999999", alpha=.18, linewidth=.8)
         means = [item["mean"] if item["mean"] is not None else np.nan
-                 for item in summaries]
+                for item in summaries]
         ci = [item["ci95"] if item["ci95"] is not None else 0 for item in summaries]
         ax.errorbar(range(3), means, yerr=ci, color="#d84a4a", marker="o",
-                    linewidth=2.2, capsize=4, label="mean ± 95% CI")
+                   linewidth=2, capsize=4)
         ax.axhline(0, color="#333333", linewidth=.8)
         ax.set_xticks(range(3), labels)
-        ax.set(title="Severity trend: %s" % score,
-               ylabel="invalid loss - valid loss")
+        ax.set_title(score)
         ax.grid(axis="y", alpha=.25)
-        ax.legend()
-        fig.tight_layout()
-        fig.savefig(os.path.join(plot_dir, "severity_%s.png" % _safe(score)), dpi=170)
-        plt.close(fig)
+    for index in range(len(present), nrows * ncols):
+        axes[index // ncols][index % ncols].axis("off")
+    fig.suptitle("Severity trends (invalid - valid denoising error)")
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, "severity_trends.png"), dpi=170)
+    plt.close(fig)
 
-    ordering = severity["by_score"]
+
+def _plot_severity_ordering(severity: Dict[str, object], plot_dir: str) -> None:
+    """Plot full weak<medium<strong ladder accuracy, overall and by family."""
+    ordering = [row for row in severity["by_score"]
+               if row["full_ladder"]["accuracy"] is not None]
+    family_rows = [row for row in severity.get("by_family_score", [])
+                  if row["full_ladder"]["accuracy"] is not None]
+    if not ordering and not family_rows:
+        return
+    plt = _pyplot()
+    ncols = 2 if (ordering and family_rows) else 1
+    fig, axes = plt.subplots(1, ncols, figsize=(7 * ncols,
+                             max(3, .45 * max(len(ordering), 1) + 1.5)))
+    axes = np.atleast_1d(axes)
+    index = 0
     if ordering:
+        ax = axes[index]
+        index += 1
         labels = [row["score"] for row in ordering]
         values = [row["full_ladder"]["accuracy"] for row in ordering]
-        keep = [i for i, value in enumerate(values) if value is not None]
-        if keep:
-            fig, ax = plt.subplots(figsize=(9, max(3, .45 * len(keep) + 1.5)))
-            ax.barh(range(len(keep)), [values[i] for i in keep], color="#59a14f")
-            ax.set_yticks(range(len(keep)), [labels[i] for i in keep])
-            ax.set(xlim=(0, 1), xlabel="fraction weak < medium < strong",
-                   title="Full severity-ladder accuracy")
-            ax.grid(axis="x", alpha=.25)
-            fig.tight_layout()
-            fig.savefig(os.path.join(plot_dir, "severity_ordering_accuracy.png"), dpi=170)
-            plt.close(fig)
-
-    family_rows = [row for row in severity.get("by_family_score", [])
-                   if row["full_ladder"]["accuracy"] is not None]
+        ax.barh(range(len(labels)), values, color="#59a14f")
+        ax.set_yticks(range(len(labels)), labels)
+        ax.set(xlim=(0, 1), xlabel="fraction weak < medium < strong",
+              title="Full ladder accuracy by score")
+        ax.grid(axis="x", alpha=.25)
     if family_rows:
+        ax = axes[index]
         families = sorted({row["family"] for row in family_rows})
         scores = sorted({row["score"] for row in family_rows})
         matrix = np.full((len(scores), len(families)), np.nan)
         for row in family_rows:
             matrix[scores.index(row["score"]), families.index(row["family"])] = (
                 row["full_ladder"]["accuracy"])
-        fig, ax = plt.subplots(figsize=(max(7, len(families) * .8),
-                                        max(3, len(scores) * .42 + 2)))
         image = ax.imshow(np.ma.masked_invalid(matrix), vmin=0, vmax=1,
                           aspect="auto", cmap="RdYlGn")
         ax.set_xticks(range(len(families)), families, rotation=40, ha="right")
         ax.set_yticks(range(len(scores)), scores)
-        ax.set_title("Severity ordering by violation family")
+        ax.set_title("Accuracy by violation family")
         fig.colorbar(image, ax=ax, label="fraction weak < medium < strong")
-        fig.tight_layout()
-        fig.savefig(os.path.join(plot_dir, "severity_ordering_by_family.png"), dpi=170)
-        plt.close(fig)
+    fig.suptitle("Severity ordering accuracy")
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, "severity_ordering.png"), dpi=170)
+    plt.close(fig)
 
 
 def write_analysis_bundle(run_dir: str, model: str,
@@ -451,15 +571,24 @@ def write_analysis_bundle(run_dir: str, model: str,
     """
     data_dir = os.path.join(run_dir, "analysis", "data")
     plot_dir = os.path.join(run_dir, "analysis", "plots", _safe(model))
+    # Clear stale PNGs (e.g. from an earlier plot layout) so the directory
+    # only ever reflects the current bundle, not a mix of old and new files.
+    if os.path.isdir(plot_dir):
+        for name in os.listdir(plot_dir):
+            if name.endswith(".png"):
+                os.remove(os.path.join(plot_dir, name))
     os.makedirs(plot_dir, exist_ok=True)
     write_csv(os.path.join(data_dir, "metrics_%s.csv" % model), rows)
     _write_category_csv(os.path.join(data_dir, "category_summary_%s.csv" % model), categories)
     _write_severity_csv(os.path.join(data_dir, "severity_ladders_%s.csv" % model), severity)
+    overall = overall_summaries(rows)
     warnings = []
     plot_jobs = (
-        ("category heatmaps", _plot_category_heatmaps, (categories, plot_dir)),
-        ("category bars", _plot_base_category_bars, (categories, plot_dir)),
-        ("severity plots", _plot_severity, (rows, severity, plot_dir)),
+        ("category breakdown", _plot_category_breakdown, (categories, plot_dir)),
+        ("spatial localization", _plot_spatial_localization, (overall, plot_dir)),
+        ("temporal localization", _plot_temporal_localization, (overall, plot_dir)),
+        ("severity trends", _plot_severity_trends, (rows, severity, plot_dir)),
+        ("severity ordering", _plot_severity_ordering, (severity, plot_dir)),
     )
     for label, function, arguments in plot_jobs:
         try:

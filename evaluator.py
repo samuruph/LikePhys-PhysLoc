@@ -970,6 +970,16 @@ def save_results(path, payload):
     os.replace(temporary_path, path)
 
 
+def resolve_output_file(args, data_name):
+    """Build the results_<model>.json path for one run without touching disk."""
+    cfg_tag = "cfg" if args.guidance_scale else "no_cfg"
+    if args.tag_name != " ":
+        exp_name = f"{args.exp_name}_{args.seed}_{cfg_tag}_{args.tag_name}"
+    else:
+        exp_name = f"{args.exp_name}_{args.seed}_{cfg_tag}"
+    return f"./{args.output_dir}/{exp_name}/{data_name}/results_{args.model}.json"
+
+
 def parse_args():
     """Parse model, benchmark, localization, and reporting CLI options."""
     parser = argparse.ArgumentParser()
@@ -1006,6 +1016,14 @@ def parse_args():
         "--summary_weighting", choices=("variation", "dataset"),
         default="variation",
         help="weighting used by --summarize_results")
+    parser.add_argument(
+        "--replot", action="store_true",
+        help=("PhysLoc: regenerate the analysis CSVs/plots for one existing "
+              "results_<model>.json (identified by the same --data, --model, "
+              "--exp_name, --seed, --tag_name, --guidance_scale, --output_dir "
+              "as the original run) and exit without loading a model or "
+              "re-evaluating. Does not regenerate --visualize MP4/PNG "
+              "artifacts, which require re-running the model."))
     parser.add_argument(
         "--visualize", action="store_true",
         help=("PhysLoc: write per-clip MP4/PNG and pair PNG artifacts; "
@@ -1054,6 +1072,28 @@ if __name__ == "__main__":
             args.summary_weighting,
         )
         sys.exit(0)
+    if args.replot:
+        if args.data != PHYSLOC:
+            raise ValueError("--replot is only meaningful for --data physloc")
+        output_file = resolve_output_file(args, PHYSLOC)
+        if not os.path.exists(output_file):
+            raise FileNotFoundError(
+                f"No existing results at {output_file}; run the evaluation "
+                "first (matching --data, --model, --exp_name, --seed, "
+                "--tag_name, --guidance_scale, --output_dir).")
+        with open(output_file, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        analysis_rows = tidy_rows(saved["scene_evaluations"])
+        category_metrics = category_summaries(analysis_rows)
+        severity_metrics = severity_sensitivity(analysis_rows)
+        warnings = write_analysis_bundle(
+            os.path.dirname(output_file), args.model, analysis_rows,
+            category_metrics, severity_metrics)
+        for warning in warnings:
+            print(warning)
+        print(f"Analysis plots regenerated at "
+              f"{os.path.dirname(output_file)}/analysis/plots/{args.model}")
+        sys.exit(0)
     args.score_groups = parse_score_groups(args.scores)
     if args.data != PHYSLOC and args.score_groups != ("base_ppe",):
         raise ValueError("localized score groups are available only with --data physloc")
@@ -1086,15 +1126,8 @@ if __name__ == "__main__":
             f"Invalid data configuration: {args.data}. Available options: "
             f"{[PHYSLOC] + list(LIKEPHYS_DATASETS)}")
 
-    # Experiment naming
-    cfg_tag = "cfg" if args.guidance_scale else "no_cfg"
-    if args.tag_name != " ":
-        exp_name = f"{args.exp_name}_{args.seed}_{cfg_tag}_{args.tag_name}"
-    else:
-        exp_name = f"{args.exp_name}_{args.seed}_{cfg_tag}"
-
     # Determine where to save results
-    output_file = f"./{args.output_dir}/{exp_name}/{data_name}/results_{args.model}.json"
+    output_file = resolve_output_file(args, data_name)
     args.run_dir = os.path.dirname(output_file)
 
     # Skip if results already exist and appear complete

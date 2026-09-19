@@ -13,6 +13,23 @@ import numpy as np
 from .physloc_metrics import temporal_bins, temporal_metrics
 
 
+def _diverging_lut() -> np.ndarray:
+    """Build a 256-entry BGR lookup table from matplotlib's coolwarm colormap.
+
+    OpenCV's COLORMAP_JET is a rainbow map: it isn't perceptually uniform and
+    introduces false banding/edges in the middle of the range, which is
+    exactly where a signed invalid-minus-valid delta needs to be readable.
+    coolwarm is diverging, perceptually ordered, and white at zero.
+    """
+    import matplotlib
+    colormap = matplotlib.colormaps["coolwarm"]
+    colors = colormap(np.linspace(0, 1, 256))[:, :3] * 255
+    return np.ascontiguousarray(colors.astype(np.uint8))  # RGB, 256x3
+
+
+_DIVERGING_LUT = _diverging_lut()
+
+
 def _safe(value: object) -> str:
     """Convert an identifier to a safe filename component."""
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("_")
@@ -65,8 +82,7 @@ def _heatmap(error: np.ndarray, width: int, height: int, scale: float,
     if signed:
         normalized = np.clip(magnitude / max(float(scale), 1e-12), -1, 1)
         indexed = ((normalized + 1.0) * 127.5).astype(np.uint8)
-        return np.ascontiguousarray(cv2.applyColorMap(
-            indexed, cv2.COLORMAP_JET)[..., ::-1])
+        return np.ascontiguousarray(_DIVERGING_LUT[indexed])
     normalized = np.clip(magnitude / max(float(scale), 1e-12), 0, 1)
     return np.ascontiguousarray(cv2.applyColorMap(
         (normalized * 255).astype(np.uint8), cv2.COLORMAP_INFERNO)[..., ::-1])
@@ -81,58 +97,54 @@ def _label_panel(panel: np.ndarray, title: str) -> np.ndarray:
     return panel
 
 
-def _text_panel(title: str, lines: Sequence[str], width: int,
-                height: int) -> np.ndarray:
-    """Create a dark panel containing compact per-frame metadata."""
-    panel = np.zeros((height, width, 3), np.uint8)
-    panel[:] = (32, 32, 38)
-    panel = _label_panel(panel, title)
-    for index, line in enumerate(lines):
-        cv2.putText(panel, str(line), (10, 52 + 24 * index),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (240, 240, 240),
-                    1, cv2.LINE_AA)
-    return panel
-
-
-def _legend_panel(title: str, width: int, height: int, scale: float,
-                  signed: bool = False) -> np.ndarray:
-    """Create a legend matching one of the visualization heatmaps."""
-    panel = np.zeros((height, width, 3), np.uint8)
-    panel[:] = (32, 32, 38)
-    panel = _label_panel(panel, title)
-    bar_x0, bar_x1 = 18, width - 18
-    bar_y0, bar_y1 = 55, min(height - 48, 105)
+def _draw_legend(panel: np.ndarray, y0: int, block_h: int, width: int,
+                 scale: float, signed: bool, title: str) -> None:
+    """Draw one compact color-scale legend into an existing panel in place."""
+    x0, x1 = 14, width - 14
+    cv2.putText(panel, title, (10, y0 + 10), cv2.FONT_HERSHEY_SIMPLEX,
+                0.32, (195, 195, 205), 1, cv2.LINE_AA)
+    bar_y0 = y0 + 16
+    bar_y1 = max(bar_y0 + 4, y0 + block_h - 16)
     values = np.linspace(-1 if signed else 0, 1,
-                         max(2, bar_x1 - bar_x0), dtype=np.float32)
-    values = values[None, :]
+                         max(2, x1 - x0), dtype=np.float32)[None, :]
     if signed:
         indexed = ((values + 1.0) * 127.5).astype(np.uint8)
-        colors = cv2.applyColorMap(indexed, cv2.COLORMAP_JET)[0, :, ::-1]
-        labels = ["valid higher", "0", "invalid higher"]
-        label_values = [-float(scale), 0.0, float(scale)]
+        colors = _DIVERGING_LUT[indexed][0]
+        ticks = [(x0, "-%.3f" % scale), ((x0 + x1) // 2, "0"),
+                (x1 - 1, "+%.3f" % scale)]
     else:
         indexed = (np.clip(values, 0, 1) * 255).astype(np.uint8)
         colors = cv2.applyColorMap(indexed, cv2.COLORMAP_INFERNO)[0, :, ::-1]
-        labels = ["low", "high"]
-        label_values = [0.0, float(scale)]
+        ticks = [(x0, "0"), (x1 - 1, "%.3f" % scale)]
     bar = np.repeat(colors[None, :, :], bar_y1 - bar_y0, axis=0)
-    panel[bar_y0:bar_y1, bar_x0:bar_x1] = bar
-    if signed:
-        positions = [bar_x0, (bar_x0 + bar_x1) // 2, bar_x1 - 1]
-    else:
-        positions = [bar_x0, bar_x1 - 1]
-    for position, label, value in zip(positions, labels, label_values):
-        cv2.line(panel, (position, bar_y1), (position, bar_y1 + 7),
-                 (240, 240, 240), 1)
-        text = "%s\n%.4f" % (label, value)
-        lines = text.split("\n")
-        text_x = max(2, min(width - 75, position - 24))
-        cv2.putText(panel, lines[0], (text_x, bar_y1 + 23),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.34, (240, 240, 240),
-                    1, cv2.LINE_AA)
-        cv2.putText(panel, lines[1], (text_x, bar_y1 + 39),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.34, (240, 240, 240),
-                    1, cv2.LINE_AA)
+    panel[bar_y0:bar_y1, x0:x1] = bar
+    for position, label in ticks:
+        cv2.line(panel, (position, bar_y1), (position, bar_y1 + 4),
+                 (230, 230, 230), 1)
+        text_x = max(2, min(width - 60, position - 20))
+        cv2.putText(panel, label, (text_x, min(y0 + block_h - 2, bar_y1 + 15)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, (230, 230, 230), 1,
+                    cv2.LINE_AA)
+
+
+def _info_panel(width: int, height: int, frame_index: int, valid_loss: float,
+                invalid_loss: float, raw_scale: float,
+                difference_scale: float) -> np.ndarray:
+    """Combine per-frame metrics with the absolute and delta color legends."""
+    panel = np.zeros((height, width, 3), np.uint8)
+    panel[:] = (32, 32, 38)
+    panel = _label_panel(panel, "FRAME INFO")
+    cv2.putText(panel, "frame %d" % frame_index, (10, 42),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (240, 240, 240), 1, cv2.LINE_AA)
+    cv2.putText(panel,
+                "valid %.4f  invalid %.4f  delta %+.4f"
+                % (valid_loss, invalid_loss, invalid_loss - valid_loss),
+                (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (240, 240, 240),
+                1, cv2.LINE_AA)
+    block = max(40, (height - 68) // 2)
+    _draw_legend(panel, 68, block, width, raw_scale, False, "ABSOLUTE ERROR")
+    _draw_legend(panel, 68 + block, block, width, difference_scale, True,
+                "SIGNED DELTA")
     return panel
 
 
@@ -179,10 +191,8 @@ def compose_pair_frame(valid_rgb: np.ndarray, invalid_rgb: np.ndarray,
                        invalid_error: np.ndarray, valid_error: np.ndarray,
                        difference: np.ndarray, raw_scale: float,
                        difference_scale: float, frame_index: int,
-                       invalid_loss: float, valid_loss: float,
-                       active=None, visible=None, expected=None,
-                       causal=None) -> np.ndarray:
-    """Compose one synchronized valid/invalid pair frame.
+                       invalid_loss: float, valid_loss: float) -> np.ndarray:
+    """Compose one synchronized valid/invalid pair frame as a 3x3 grid.
 
     The delta panel is the signed invalid-minus-valid residual. Red means the
     invalid clip has higher error; blue means the valid clip has higher error.
@@ -190,12 +200,6 @@ def compose_pair_frame(valid_rgb: np.ndarray, invalid_rgb: np.ndarray,
     invalid_rgb = _resize(invalid_rgb)
     valid_rgb = _resize(valid_rgb)
     height, width = invalid_rgb.shape[:2]
-    resize_mask = lambda value: None if value is None else cv2.resize(
-        np.asarray(value, np.uint8), (width, height),
-        interpolation=cv2.INTER_NEAREST) > 0
-    annotation = annotation_overlay(
-        invalid_rgb, resize_mask(active), resize_mask(visible),
-        resize_mask(expected), resize_mask(causal))
     invalid_heat = _heatmap(invalid_error, width, height, raw_scale)
     valid_heat = _heatmap(valid_error, width, height, raw_scale)
     difference_heat = _heatmap(
@@ -203,35 +207,23 @@ def compose_pair_frame(valid_rgb: np.ndarray, invalid_rgb: np.ndarray,
     valid_overlay = (0.45 * valid_rgb + 0.55 * valid_heat).astype(np.uint8)
     invalid_overlay = (0.45 * invalid_rgb + 0.55 * invalid_heat).astype(np.uint8)
     difference_overlay = (0.45 * invalid_rgb + 0.55 * difference_heat).astype(np.uint8)
-    metrics = _text_panel(
-        "FRAME METRICS",
-        ["frame %d" % frame_index,
-         "valid PPE %.4f" % valid_loss,
-         "invalid PPE %.4f" % invalid_loss,
-         "PPE delta %.4f" % (invalid_loss - valid_loss)],
-        width, height)
-    absolute_legend = _legend_panel(
-        "ABSOLUTE ERROR", width, height, raw_scale)
-    delta_legend = _legend_panel(
-        "SIGNED DELTA", width, height, difference_scale, signed=True)
+    info = _info_panel(width, height, frame_index, valid_loss, invalid_loss,
+                       raw_scale, difference_scale)
     rows = [
         [
             _label_panel(valid_rgb, "VALID RGB"),
             _label_panel(valid_heat, "VALID ERROR"),
             _label_panel(valid_overlay, "VALID OVERLAY"),
-            metrics,
         ],
         [
             _label_panel(invalid_rgb, "INVALID RGB"),
-            _label_panel(annotation, "ANNOTATIONS"),
             _label_panel(invalid_heat, "INVALID ERROR"),
             _label_panel(invalid_overlay, "INVALID OVERLAY"),
         ],
         [
             _label_panel(difference_heat, "DELTA: INVALID - VALID"),
             _label_panel(difference_overlay, "DELTA OVERLAY"),
-            absolute_legend,
-            delta_legend,
+            info,
         ],
     ]
     return np.vstack([np.hstack(row) for row in rows])
@@ -311,18 +303,15 @@ def render_pair_clip(valid_runtime: Dict, invalid_runtime: Dict,
     valid_errors = expand_error_grid(valid_runtime["grid"], len(indices))
     invalid_errors = expand_error_grid(invalid_runtime["grid"], len(indices))
     differences = invalid_errors - valid_errors
-    annotations = _raw_annotations(invalid_sample, indices)
     valid_loss = float(valid_runtime["info"]["loss"])
     invalid_loss = float(invalid_runtime["info"]["loss"])
-    frames = []
-    for t in range(len(indices)):
-        kwargs = ({name: annotations[name][t] for name in
-                   ("active", "visible", "expected", "causal")}
-                  if annotations is not None else {})
-        frames.append(compose_pair_frame(
+    frames = [
+        compose_pair_frame(
             valid_source[t], invalid_source[t], invalid_errors[t],
             valid_errors[t], differences[t], raw_scale, difference_scale,
-            t, invalid_loss, valid_loss, **kwargs))
+            t, invalid_loss, valid_loss)
+        for t in range(len(indices))
+    ]
     os.makedirs(os.path.dirname(output_mp4), exist_ok=True)
     video_frames = np.stack(frames)
     pad_h = (-video_frames.shape[1]) % 16

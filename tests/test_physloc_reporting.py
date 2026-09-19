@@ -75,7 +75,7 @@ class ReportingTests(unittest.TestCase):
             self.assertTrue(__import__("os").path.exists(
                 root + "/analysis/data/category_summary_model.csv"))
             self.assertTrue(__import__("os").path.exists(
-                root + "/analysis/plots/model/severity_base_ppe.png"))
+                root + "/analysis/plots/model/severity_trends.png"))
 
     def test_plot_failure_does_not_discard_csv_outputs(self):
         rows = tidy_rows({"pair": {
@@ -85,7 +85,7 @@ class ReportingTests(unittest.TestCase):
         categories = category_summaries(rows)
         severity = severity_sensitivity(rows)
         with tempfile.TemporaryDirectory() as root, mock.patch(
-                "utils.physloc_reporting._plot_category_heatmaps",
+                "utils.physloc_reporting._plot_category_breakdown",
                 side_effect=RuntimeError("render failed")):
             warnings = write_analysis_bundle(
                 root, "model", rows, categories, severity)
